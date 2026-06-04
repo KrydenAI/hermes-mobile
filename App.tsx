@@ -7,7 +7,7 @@ import * as Haptics from 'expo-haptics';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import QRCode from 'react-native-qrcode-svg';
 
-import { HermesRestClient, HermesRpcClient, normalizeBaseUrl, parsePairingPayload } from './src/api/hermes';
+import { HermesRestClient, HermesRpcClient, normalizeBaseUrl, parsePairingPayload, prepareConnectionProfile } from './src/api/hermes';
 import { deleteProfile, loadProfiles, upsertProfile } from './src/storage';
 import { colors, radius, shadow } from './src/theme';
 import type { ConnectionProfile, CronJob, HermesEvent, McpServer, SessionSummary, SkillInfo, ToolsetInfo } from './src/types';
@@ -63,11 +63,11 @@ export default function App() {
     if (!target) return;
     setStatus('testing'); setError('');
     try {
-      const client = new HermesRestClient(target);
-      const st = await client.status();
-      setStatusPayload(st);
+      const prepared = await prepareConnectionProfile(target);
+      const runtimeProfile = prepared.profile;
+      setStatusPayload({ ...prepared.status, mobile_message: prepared.message });
       rpcRef.current?.close();
-      const rpc = new HermesRpcClient(target);
+      const rpc = new HermesRpcClient(runtimeProfile);
       rpc.onEvent((event: HermesEvent) => {
         setEvents(prev => [{ ...event, receivedAt: Date.now() }, ...prev].slice(0, 80));
         if (event.type === 'message.delta') {
@@ -86,7 +86,7 @@ export default function App() {
       await rpc.connect();
       rpcRef.current = rpc;
       setStatus('connected');
-      const updated = { ...target, lastUsedAt: Date.now() };
+      const updated = { ...runtimeProfile, wsTicket: undefined, lastUsedAt: Date.now() };
       setProfile(updated);
       setProfiles(await upsertProfile(updated));
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => undefined);
@@ -136,47 +136,51 @@ function TabBar({ active, setActive }: { active: Tab; setActive: (t: Tab) => voi
   </ScrollView>;
 }
 
-function ConnectScreen({ profiles, active, status, error, statusPayload, onSelect, onSave, onDelete, onConnect }: any) {
+function ConnectScreen({ profiles, active, status, error, statusPayload, onSelect, onSave, onDelete }: any) {
   const [name, setName] = useState(active?.name || 'My Hermes');
   const [baseUrl, setBaseUrl] = useState(active?.baseUrl || 'http://100.x.y.z:9119');
   const [token, setToken] = useState(active?.token || '');
+  const [username, setUsername] = useState(active?.username || '');
+  const [password, setPassword] = useState(active?.password || '');
   const [showScanner, setShowScanner] = useState(false);
   const pairingValue = `hermesmobile://connect?url=${encodeURIComponent(normalizeBaseUrl(baseUrl))}&token=${encodeURIComponent(token)}`;
-  const setupCommand = 'TOKEN=$(openssl rand -base64 32)\nprintf "HERMES_DASHBOARD_SESSION_TOKEN=%s\\n" "$TOKEN" >> ~/.hermes/.env\nchmod 600 ~/.hermes/.env\nhermes dashboard --tui --no-open --insecure --host <tailscale-or-lan-ip> --port 9119';
-  useEffect(() => { if (active) { setName(active.name); setBaseUrl(active.baseUrl); setToken(active.token); } }, [active]);
+  const setupCommand = 'hermes dashboard --tui --no-open --host <tailscale-or-lan-ip> --port 9119 --insecure';
+  useEffect(() => { if (active) { setName(active.name); setBaseUrl(active.baseUrl); setToken(active.token || ''); setUsername(active.username || ''); setPassword(active.password || ''); } }, [active]);
 
-  const save = () => onSave({ id: active?.id || makeId(), name: name.trim() || 'Hermes', baseUrl: normalizeBaseUrl(baseUrl), token: token.trim(), createdAt: active?.createdAt || Date.now(), lastUsedAt: Date.now() });
+  const save = () => onSave({ id: active?.id || makeId(), name: name.trim() || 'Hermes', baseUrl: normalizeBaseUrl(baseUrl), token: token.trim(), username: username.trim(), password, authMode: username.trim() || password ? 'password' : 'auto', createdAt: active?.createdAt || Date.now(), lastUsedAt: Date.now() });
 
   return <ScrollView contentContainerStyle={styles.screen}>
     <Card>
-      <Text style={styles.sectionTitle}>First: start your Hermes backend</Text>
-      <Text style={styles.muted}>Desktop auto-starts a private dashboard only on the same machine as Hermes Agent. Mobile controls another machine, so start that machine's dashboard once, then connect below by URL + token. No plugin. No Kryden cloud.</Text>
+      <Text style={styles.sectionTitle}>Quick Connect</Text>
+      <Text style={styles.muted}>Enter the dashboard URL. In Tailnet/LAN mode Hermes Mobile auto-discovers the injected session token from the dashboard HTML. For login-protected dashboards, enter the dashboard username/password below.</Text>
     </Card>
     <Card>
       <Text style={styles.sectionTitle}>Connect to your Hermes Agent</Text>
-      <Text style={styles.muted}>After the backend is running, this is the only connection info Hermes Mobile needs.</Text>
+      <Text style={styles.muted}>URL-only is the default. Session token and username/password are advanced fallbacks.</Text>
       <Label text="Profile name" /><Input value={name} onChangeText={setName} placeholder="My Hermes" />
-      <Label text="Backend URL" /><Input value={baseUrl} onChangeText={setBaseUrl} autoCapitalize="none" placeholder="http://desktop.tailnet.ts.net:9119" />
-      <View style={styles.row}><Button icon="qr-code-outline" text="Scan QR" onPress={() => setShowScanner(true)} secondary /><Button icon="flash-outline" text={status === 'testing' ? 'Testing...' : 'Save + Connect'} onPress={save} /></View>
+      <Label text="Dashboard URL" /><Input value={baseUrl} onChangeText={setBaseUrl} autoCapitalize="none" placeholder="http://desktop.tailnet.ts.net:9119" />
+      <View style={styles.row}><Button icon="qr-code-outline" text="Scan QR" onPress={() => setShowScanner(true)} secondary /><Button icon="flash-outline" text={status === 'testing' ? 'Connecting...' : 'Save + Connect'} onPress={save} /></View>
       {error ? <Text style={styles.error}>{error}</Text> : null}
-      {statusPayload ? <Text style={styles.success}>REST OK · {String(statusPayload.version || statusPayload.hermes_version || 'Hermes')}</Text> : null}
-      <Label text="Dashboard session token" /><Input value={token} onChangeText={setToken} autoCapitalize="none" secureTextEntry placeholder="Paste token" />
+      {statusPayload ? <Text style={styles.success}>REST OK · {String(statusPayload.version || statusPayload.hermes_version || 'Hermes')} · {String(statusPayload.mobile_message || 'connected')}</Text> : null}
+      <Label text="Session token (optional)" /><Input value={token} onChangeText={setToken} autoCapitalize="none" secureTextEntry placeholder="Usually auto-discovered" />
+      <Label text="Dashboard username (login-protected only)" /><Input value={username} onChangeText={setUsername} autoCapitalize="none" placeholder="Optional" />
+      <Label text="Dashboard password (login-protected only)" /><Input value={password} onChangeText={setPassword} secureTextEntry placeholder="Optional" />
     </Card>
     <Card>
       <Text style={styles.sectionTitle}>1-2-3 backend setup</Text>
-      <Text style={styles.muted}>Use this if the URL/token fields above do not mean anything yet. Tailscale is the recommended secure remote path.</Text>
+      <Text style={styles.muted}>Fastest mobile-compatible path: Tailscale plus the normal dashboard session-token mode. No rand command and no manual token paste needed.</Text>
       <Step n="1" text="Install Tailscale on the computer running Hermes and on this phone." />
       <Step n="2" text="Sign into the same tailnet. Copy the computer's MagicDNS name or 100.x IP." />
-      <Step n="3" text="Run Hermes with --tui, a stable token, and host set to the Tailscale/LAN IP. Do not expose this publicly." />
+      <Step n="3" text="Run Hermes with --tui and host set to the Tailscale/LAN IP. Do not expose this publicly." />
       <Command text={setupCommand} />
       <View style={styles.row}><Button text="Open Tailscale" icon="open-outline" secondary onPress={() => Linking.openURL('https://tailscale.com/download')} /><Button text="Copy command" icon="copy-outline" secondary onPress={() => Clipboard.setStringAsync(setupCommand)} /></View>
     </Card>
     <Card>
       <Text style={styles.sectionTitle}>Pairing QR</Text>
-      <Text style={styles.muted}>For development and future desktop pairing. Treat this QR like a password.</Text>
-      <View style={styles.qrWrap}>{token ? <QRCode value={pairingValue} size={170} backgroundColor="transparent" color={colors.text} /> : <Text style={styles.muted}>Enter a token to generate QR.</Text>}</View>
+      <Text style={styles.muted}>Manual QR fallback. In Quick Connect mode the app does not need this.</Text>
+      <View style={styles.qrWrap}>{token ? <QRCode value={pairingValue} size={170} backgroundColor="transparent" color={colors.text} /> : <Text style={styles.muted}>A stored/advanced token can generate QR here.</Text>}</View>
     </Card>
-    {profiles.length ? <Card><Text style={styles.sectionTitle}>Saved backends</Text>{profiles.map((p: ConnectionProfile) => <Pressable key={p.id} style={styles.listItem} onPress={() => onSelect(p)}><View><Text style={styles.listTitle}>{p.name}</Text><Text style={styles.listSub}>{p.baseUrl}</Text></View><Pressable onPress={() => onDelete(p.id)}><Ionicons name="trash-outline" size={18} color={colors.bad} /></Pressable></Pressable>)}</Card> : null}
+    {profiles.length ? <Card><Text style={styles.sectionTitle}>Saved backends</Text>{profiles.map((p: ConnectionProfile) => <Pressable key={p.id} style={styles.listItem} onPress={() => onSelect(p)}><View><Text style={styles.listTitle}>{p.name}</Text><Text style={styles.listSub}>{p.baseUrl} · {p.authMode || 'auto'}</Text></View><Pressable onPress={() => onDelete(p.id)}><Ionicons name="trash-outline" size={18} color={colors.bad} /></Pressable></Pressable>)}</Card> : null}
     <Scanner visible={showScanner} onClose={() => setShowScanner(false)} onData={data => { const parsed = parsePairingPayload(data); if (parsed?.baseUrl) { setBaseUrl(parsed.baseUrl); setToken(parsed.token || ''); setShowScanner(false); } }} />
   </ScrollView>;
 }
@@ -227,7 +231,7 @@ function McpScreen({ rest }: { rest: HermesRestClient | null }) { const [servers
 
 function CronScreen({ rest }: { rest: HermesRestClient | null }) { const [jobs,setJobs]=useState<CronJob[]>([]); const [name,setName]=useState(''); const [schedule,setSchedule]=useState('every 4h'); const [prompt,setPrompt]=useState(''); const [err,setErr]=useState(''); const load=async()=>{ if(!rest)return; setJobs(await rest.cronJobs());}; useEffect(()=>{ load().catch(e=>setErr(e.message));},[rest]); const create=async()=>{ try{ await rest?.createCronJob({ name, schedule, prompt }); setName(''); setPrompt(''); await load(); } catch(e:any){setErr(e.message);} }; return <ScrollView contentContainerStyle={styles.screen}><Card><Text style={styles.sectionTitle}>Cron jobs</Text><Text style={styles.muted}>Create, pause/resume, trigger, and delete Hermes scheduled jobs.</Text>{err?<Text style={styles.error}>{err}</Text>:null}<Label text="Name"/><Input value={name} onChangeText={setName} placeholder="Morning operator brief"/><Label text="Schedule"/><Input value={schedule} onChangeText={setSchedule}/><Label text="Prompt"/><Input value={prompt} onChangeText={setPrompt} placeholder="What should Hermes do?" multiline/><Button text="Create cron" icon="add-outline" onPress={create}/></Card>{jobs.map(j=>{const id=String(j.job_id||j.id||''); return <Card key={id}><Text style={styles.listTitle}>{j.name||id}</Text><Text style={styles.listSub}>{j.schedule} · {j.enabled===false||j.paused?'paused':'enabled'}</Text><Text style={styles.muted}>{String(j.prompt||'').slice(0,160)}</Text><View style={styles.row}><Button text={j.enabled===false||j.paused?'Resume':'Pause'} secondary icon="pause-outline" onPress={async()=>{j.enabled===false||j.paused?await rest?.resumeCronJob(id):await rest?.pauseCronJob(id); await load();}}/><Button text="Run" secondary icon="play-outline" onPress={async()=>{await rest?.triggerCronJob(id); await load();}}/><Button text="Delete" secondary icon="trash-outline" onPress={async()=>{await rest?.deleteCronJob(id); await load();}}/></View></Card>})}</ScrollView>; }
 
-function SettingsScreen({ rest, profile, statusPayload }: { rest: HermesRestClient | null; profile: ConnectionProfile | null; statusPayload: any }) { const [model,setModel]=useState<any>(null); const [profiles,setProfiles]=useState<any>(null); const [logs,setLogs]=useState<any>(null); const load=async()=>{ if(!rest)return; const [m,p,l]=await Promise.all([rest.modelInfo().catch((e:any)=>({error:e.message})), rest.profiles().catch((e:any)=>({error:e.message})), rest.logs(40).catch((e:any)=>({error:e.message}))]); setModel(m); setProfiles(p); setLogs(l); }; useEffect(()=>{load().catch(()=>undefined)},[rest]); return <ScrollView contentContainerStyle={styles.screen}><Card><Text style={styles.sectionTitle}>Settings + system</Text><Text style={styles.muted}>Sensitive admin actions like env reveal, update, restart, raw config edits are intentionally not front-and-center on mobile.</Text><Button text="Refresh" icon="refresh-outline" secondary onPress={load}/></Card><JsonCard title="Connection" data={{ name: profile?.name, baseUrl: profile?.baseUrl, token: profile?.token ? '[stored securely]' : null, platform: Platform.OS }} /><JsonCard title="Status" data={statusPayload}/><JsonCard title="Model" data={model}/><JsonCard title="Profiles" data={profiles}/><JsonCard title="Logs" data={logs}/></ScrollView>; }
+function SettingsScreen({ rest, profile, statusPayload }: { rest: HermesRestClient | null; profile: ConnectionProfile | null; statusPayload: any }) { const [model,setModel]=useState<any>(null); const [profiles,setProfiles]=useState<any>(null); const [logs,setLogs]=useState<any>(null); const load=async()=>{ if(!rest)return; const [m,p,l]=await Promise.all([rest.modelInfo().catch((e:any)=>({error:e.message})), rest.profiles().catch((e:any)=>({error:e.message})), rest.logs(40).catch((e:any)=>({error:e.message}))]); setModel(m); setProfiles(p); setLogs(l); }; useEffect(()=>{load().catch(()=>undefined)},[rest]); return <ScrollView contentContainerStyle={styles.screen}><Card><Text style={styles.sectionTitle}>Settings + system</Text><Text style={styles.muted}>Sensitive admin actions like env reveal, update, restart, raw config edits are intentionally not front-and-center on mobile.</Text><Button text="Refresh" icon="refresh-outline" secondary onPress={load}/></Card><JsonCard title="Connection" data={{ name: profile?.name, baseUrl: profile?.baseUrl, authMode: profile?.authMode || 'auto', token: profile?.token ? '[stored securely]' : null, username: profile?.username || null, password: profile?.password ? '[stored securely]' : null, platform: Platform.OS }} /><JsonCard title="Status" data={statusPayload}/><JsonCard title="Model" data={model}/><JsonCard title="Profiles" data={profiles}/><JsonCard title="Logs" data={logs}/></ScrollView>; }
 
 function ToggleRow({ title, sub, on, onPress }: { title:string; sub:string; on:boolean; onPress:()=>void }) { return <Pressable style={styles.listItem} onPress={onPress}><View style={{flex:1}}><Text style={styles.listTitle}>{title}</Text><Text style={styles.listSub}>{sub}</Text></View><View style={[styles.toggle,on&&styles.toggleOn]}><View style={[styles.knob,on&&styles.knobOn]}/></View></Pressable>; }
 function JsonCard({ title, data }: { title:string; data:any }) { return <Card><Text style={styles.sectionTitle}>{title}</Text><Text style={styles.code}>{JSON.stringify(data ?? {}, null, 2).slice(0,2200)}</Text></Card>; }

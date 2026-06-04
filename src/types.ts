@@ -3,6 +3,10 @@ export type ConnectionProfile = {
   name: string;
   baseUrl: string;
   token: string;
+  authMode?: 'auto' | 'token' | 'password' | 'oauth';
+  username?: string;
+  password?: string;
+  wsTicket?: string;
   createdAt: number;
   lastUsedAt: number;
 };
