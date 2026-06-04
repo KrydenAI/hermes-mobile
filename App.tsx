@@ -67,6 +67,28 @@ function safeText(value: any, fallback = ''): string {
   return String(value);
 }
 
+async function fetchAllSessions(rest: HermesRestClient, archived: 'exclude' | 'include' | 'only' = 'exclude'): Promise<SessionSummary[]> {
+  const pageSize = 100;
+  const out: SessionSummary[] = [];
+  let offset = 0;
+  for (let page = 0; page < 200; page += 1) {
+    const data = await rest.sessions(pageSize, offset, archived);
+    const batch = Array.isArray(data) ? data : data.sessions || [];
+    out.push(...batch);
+    const total = Array.isArray(data) ? undefined : data.total;
+    if (!batch.length || batch.length < pageSize) break;
+    offset += batch.length;
+    if (typeof total === 'number' && out.length >= total) break;
+  }
+  const seen = new Set<string>();
+  return out.filter(s => {
+    const id = sessionId(s);
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
 function compactJson(value: any, max = 140): string {
   const text = safeText(value).replace(/\s+/g, ' ').trim();
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
@@ -375,8 +397,8 @@ function ChatScreen({ rest, rpc, connected, activeSession, setActiveSession, act
     if (!rest) return;
     setLoadingSessions(true);
     try {
-      const data = await rest.sessions();
-      setSessions(Array.isArray(data) ? data : data.sessions || []);
+      const data = await fetchAllSessions(rest, 'include');
+      setSessions(data);
     } finally { setLoadingSessions(false); }
   };
   useEffect(() => { refresh().catch(e => setErr(e.message)); }, [rest]);
@@ -525,14 +547,14 @@ function ArtifactsScreen({ rest }: { rest: HermesRestClient | null }) {
     if (!rest) return;
     setLoading(true);
     try {
-      const data = await rest.sessions(12);
-      const sessions = Array.isArray(data) ? data : data.sessions || [];
+      const sessions = await fetchAllSessions(rest, 'include');
       const seen = new Set<string>();
       const out: ArtifactItem[] = [];
-      for (const s of sessions.slice(0, 8)) {
+      for (const s of sessions) {
         try {
           const m = await rest.sessionMessages(sessionId(s));
-          for (const msg of (m.messages || m || []).slice(-40)) {
+          const messages = (m.messages || m || []).slice().reverse();
+          for (const msg of messages) {
             for (const item of extractArtifactItems(msg, titleOf(s))) {
               const key = `${item.kind}:${item.value}`;
               if (seen.has(key)) continue;
@@ -542,7 +564,7 @@ function ArtifactsScreen({ rest }: { rest: HermesRestClient | null }) {
           }
         } catch {}
       }
-      setItems(out.slice(0, 80));
+      setItems(out);
     } finally { setLoading(false); }
   };
   useEffect(()=>{ load().catch(e=>setErr(e.message)); }, [rest]);

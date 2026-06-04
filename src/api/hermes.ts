@@ -108,7 +108,9 @@ export class HermesRestClient {
   wsTicket() { return this.request<{ticket: string}>('/api/auth/ws-ticket', { method: 'POST' }); }
 
   systemStats() { return this.request<any>('/api/system/stats'); }
-  sessions(limit = 50) { return this.request<{sessions?: SessionSummary[]} | SessionSummary[]>(`/api/sessions?limit=${limit}&offset=0&archived=exclude&order=recent`); }
+  sessions(limit = 50, offset = 0, archived: 'exclude' | 'include' | 'only' = 'exclude') {
+    return this.request<{sessions?: SessionSummary[]; total?: number; limit?: number; offset?: number} | SessionSummary[]>(`/api/sessions?limit=${limit}&offset=${offset}&archived=${archived}&order=recent`);
+  }
   sessionMessages(id: string) { return this.request<any>(`/api/sessions/${encodeURIComponent(id)}/messages`); }
   renameSession(id: string, title: string) { return this.request(`/api/sessions/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ title }) }); }
   deleteSession(id: string) { return this.request(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }); }
