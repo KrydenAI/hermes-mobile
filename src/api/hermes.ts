@@ -16,6 +16,14 @@ export type GatewayProbe = {
   injectedToken?: string;
 };
 
+function providerLabel(provider: AuthProviderInfo): string {
+  return provider.display_name || provider.name;
+}
+
+function providerListLabel(providers: AuthProviderInfo[]): string {
+  return providers.map(providerLabel).filter(Boolean).join(', ') || 'unknown OAuth provider';
+}
+
 export function normalizeBaseUrl(url: string): string {
   const trimmed = url.trim().replace(/\/$/, '');
   if (!trimmed) return '';
@@ -166,11 +174,11 @@ export async function prepareConnectionProfile(profile: ConnectionProfile): Prom
     try {
       await client.authMe();
     } catch {
-      const providerList = probe.providers.map(p => p.display_name || p.name).join(', ') || 'no providers reported';
+      const providerList = providerListLabel(probe.providers);
       if (passwordProvider) {
-        throw new Error(`This dashboard requires login. Enter username/password for ${passwordProvider.display_name || passwordProvider.name}, then connect again.`);
+        throw new Error(`This dashboard is protected by Hermes internal login (${providerLabel(passwordProvider)}). Enter username/password, then connect again.`);
       }
-      throw new Error(`This dashboard requires browser OAuth (${providerList}). Native OAuth handoff is not implemented yet; use username/password auth or Tailnet Quick Connect.`);
+      throw new Error(`External browser OAuth is gating this dashboard (${providerList}). Hermes Mobile does not use a WebView cookie bridge. Use Tailnet Quick Connect with --insecure, or enable a Hermes internal username/password provider.`);
     }
   }
 

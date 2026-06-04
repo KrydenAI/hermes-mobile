@@ -7,7 +7,10 @@
 ## MVP scope
 
 - Front-and-center connection setup for first-time users.
-- Manual backend URL + token setup.
+- URL-only Tailnet/LAN setup for `--insecure` dashboards; Hermes Mobile auto-discovers the injected session token from the dashboard HTML.
+- Optional advanced manual token setup.
+- Hermes internal username/password login support when the dashboard advertises a password-capable provider.
+- Explicit unsupported message when an external browser OAuth provider gates the dashboard; no WebView cookie bridge is attempted.
 - QR pairing payload support (`hermesmobile://connect?url=...&token=...` or JSON `{ "url": "...", "token": "..." }`).
 - Tailscale setup assistant for secure remote access without exposing Hermes publicly.
 - REST client for the existing dashboard API.
@@ -20,26 +23,27 @@
 
 ## Backend requirement
 
-Hermes Mobile talks to the standard Hermes dashboard backend. Hermes Desktop can auto-start a private dashboard only when it is running on the same machine as Hermes Agent. A phone cannot start a process on your computer, so Mobile makes this explicit in the first-run setup wizard: start the backend once, then connect by URL + token.
+Hermes Mobile talks to the standard Hermes dashboard backend. Hermes Desktop can auto-start a private dashboard only when it is running on the same machine as Hermes Agent. A phone cannot start a process on your computer, so Mobile makes this explicit in the first-run setup wizard: start the backend once, then connect by URL.
 
-Start Hermes with TUI/chat support and a stable session token:
+Fastest path: start Hermes with TUI/chat support on a trusted Tailnet/LAN address:
 
 ```bash
-# Generate a stable private token; do not publish it.
-TOKEN=$(openssl rand -base64 32)
-printf 'HERMES_DASHBOARD_SESSION_TOKEN=%s\n' "$TOKEN" >> ~/.hermes/.env
-chmod 600 ~/.hermes/.env
-
-# Local/Tailscale-friendly backend. Prefer a Tailscale IP or MagicDNS host for remote use.
+# Local/Tailscale-friendly backend. Prefer a Tailscale IP or MagicDNS host.
 hermes dashboard --tui --no-open --insecure --host <tailscale-or-lan-ip> --port 9119
 ```
 
 Then connect Hermes Mobile to:
 
 - URL: `http://<tailscale-or-lan-ip>:9119`
-- Token: the value you generated above
+- Token: leave blank; Hermes Mobile auto-discovers it from the dashboard HTML in this mode.
 
-Security note: `--insecure` means the dashboard accepts token auth on non-loopback interfaces. Use Tailscale or a trusted LAN. Do **not** expose the dashboard to the public internet.
+Security note: `--insecure` means the dashboard accepts session-token auth on non-loopback interfaces. Use Tailscale or a trusted LAN. Do **not** expose the dashboard to the public internet.
+
+Auth support matrix:
+
+- `--insecure` Tailnet/LAN dashboard: supported with URL only.
+- Hermes internal username/password dashboard provider: supported with credentials entered in the app.
+- External browser OAuth-only gated dashboard: detected and reported to the user as unsupported for now. Hermes Mobile intentionally does not use a WebView cookie bridge.
 
 ## Development
 

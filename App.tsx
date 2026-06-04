@@ -152,32 +152,28 @@ function ConnectScreen({ profiles, active, status, error, statusPayload, onSelec
   return <ScrollView contentContainerStyle={styles.screen}>
     <Card>
       <Text style={styles.sectionTitle}>Quick Connect</Text>
-      <Text style={styles.muted}>Enter the dashboard URL. In Tailnet/LAN mode Hermes Mobile auto-discovers the injected session token from the dashboard HTML. For login-protected dashboards, enter the dashboard username/password below.</Text>
+      <Text style={styles.muted}>Paste your dashboard URL. Token discovery is automatic for Tailnet/LAN mode.</Text>
     </Card>
     <Card>
       <Text style={styles.sectionTitle}>Connect to your Hermes Agent</Text>
-      <Text style={styles.muted}>URL-only is the default. Session token and username/password are advanced fallbacks.</Text>
       <Label text="Profile name" /><Input value={name} onChangeText={setName} placeholder="My Hermes" />
       <Label text="Dashboard URL" /><Input value={baseUrl} onChangeText={setBaseUrl} autoCapitalize="none" placeholder="http://desktop.tailnet.ts.net:9119" />
       <View style={styles.row}><Button icon="qr-code-outline" text="Scan QR" onPress={() => setShowScanner(true)} secondary /><Button icon="flash-outline" text={status === 'testing' ? 'Connecting...' : 'Save + Connect'} onPress={save} /></View>
       {error ? <Text style={styles.error}>{error}</Text> : null}
       {statusPayload ? <Text style={styles.success}>REST OK · {String(statusPayload.version || statusPayload.hermes_version || 'Hermes')} · {String(statusPayload.mobile_message || 'connected')}</Text> : null}
       <Label text="Session token (optional)" /><Input value={token} onChangeText={setToken} autoCapitalize="none" secureTextEntry placeholder="Usually auto-discovered" />
-      <Label text="Dashboard username (login-protected only)" /><Input value={username} onChangeText={setUsername} autoCapitalize="none" placeholder="Optional" />
-      <Label text="Dashboard password (login-protected only)" /><Input value={password} onChangeText={setPassword} secureTextEntry placeholder="Optional" />
+      <Label text="Internal login username (optional)" /><Input value={username} onChangeText={setUsername} autoCapitalize="none" placeholder="Only if dashboard advertises password login" />
+      <Label text="Internal login password (optional)" /><Input value={password} onChangeText={setPassword} secureTextEntry placeholder="Only if dashboard advertises password login" />
     </Card>
     <Card>
-      <Text style={styles.sectionTitle}>1-2-3 backend setup</Text>
-      <Text style={styles.muted}>Fastest mobile-compatible path: Tailscale plus the normal dashboard session-token mode. No rand command and no manual token paste needed.</Text>
-      <Step n="1" text="Install Tailscale on the computer running Hermes and on this phone." />
-      <Step n="2" text="Sign into the same tailnet. Copy the computer's MagicDNS name or 100.x IP." />
-      <Step n="3" text="Run Hermes with --tui and host set to the Tailscale/LAN IP. Do not expose this publicly." />
+      <Text style={styles.sectionTitle}>Recommended backend</Text>
+      <Text style={styles.muted}>Run this on your Hermes computer, then paste the URL above.</Text>
       <Command text={setupCommand} />
       <View style={styles.row}><Button text="Open Tailscale" icon="open-outline" secondary onPress={() => Linking.openURL('https://tailscale.com/download')} /><Button text="Copy command" icon="copy-outline" secondary onPress={() => Clipboard.setStringAsync(setupCommand)} /></View>
     </Card>
     <Card>
       <Text style={styles.sectionTitle}>Pairing QR</Text>
-      <Text style={styles.muted}>Manual QR fallback. In Quick Connect mode the app does not need this.</Text>
+      <Text style={styles.muted}>Optional fallback.</Text>
       <View style={styles.qrWrap}>{token ? <QRCode value={pairingValue} size={170} backgroundColor="transparent" color={colors.text} /> : <Text style={styles.muted}>A stored/advanced token can generate QR here.</Text>}</View>
     </Card>
     {profiles.length ? <Card><Text style={styles.sectionTitle}>Saved backends</Text>{profiles.map((p: ConnectionProfile) => <Pressable key={p.id} style={styles.listItem} onPress={() => onSelect(p)}><View><Text style={styles.listTitle}>{p.name}</Text><Text style={styles.listSub}>{p.baseUrl} · {p.authMode || 'auto'}</Text></View><Pressable onPress={() => onDelete(p.id)}><Ionicons name="trash-outline" size={18} color={colors.bad} /></Pressable></Pressable>)}</Card> : null}
