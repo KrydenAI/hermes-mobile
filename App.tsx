@@ -21,7 +21,7 @@ type MessagePart =
   | NonTextPart;
 type Message = { id: string; role: MessageRole; text: string; at: number; parts?: MessagePart[] };
 type ArtifactKind = 'image' | 'file' | 'link';
-type ArtifactItem = { session: string; kind: ArtifactKind; label: string; value: string; href: string; canOpen: boolean };
+type ArtifactItem = { session: string; kind: ArtifactKind; label: string; value: string; href: string; canOpen: boolean; at: number };
 type Status = 'idle' | 'testing' | 'connected' | 'error';
 
 const tabs: { id: Exclude<Tab, 'home'>; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
@@ -43,6 +43,12 @@ function sessionTime(s: SessionSummary): number {
   const compactDate = `${sessionId(s)} ${titleOf(s)}`.match(/(20\d{2})(\d{2})(\d{2})(?:[_-](\d+))?/);
   if (compactDate) return Date.parse(`${compactDate[1]}-${compactDate[2]}-${compactDate[3]}T00:00:00Z`) + Number(compactDate[4] || 0);
   return 0;
+}
+function messageTime(raw: any, sessionFallback = 0): number {
+  const direct = raw?.timestamp ?? raw?.created_at ?? raw?.at ?? raw?.time;
+  if (typeof direct === 'number') return direct > 1e12 ? direct : direct * 1000;
+  const parsed = direct ? Date.parse(safeText(direct)) : 0;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : sessionFallback || Date.now();
 }
 function sessionMessageCount(s: SessionSummary): number { return Number(s.message_count ?? (s as any).messages_count ?? 0) || 0; }
 function isEmptySession(s: SessionSummary): boolean { return sessionMessageCount(s) <= 0; }
@@ -614,7 +620,7 @@ function ArtifactsScreen({ rest }: { rest: HermesRestClient | null }) {
           const m = await rest.sessionMessages(sessionId(s));
           const messages = (m.messages || m || []).slice().reverse();
           for (const msg of messages) {
-            for (const item of extractArtifactItems(msg, titleOf(s))) {
+            for (const item of extractArtifactItems(msg, titleOf(s), sessionTime(s))) {
               const key = `${item.kind}:${item.value}`;
               if (seenRef.current.has(key)) continue;
               seenRef.current.add(key);
@@ -623,7 +629,7 @@ function ArtifactsScreen({ rest }: { rest: HermesRestClient | null }) {
           }
         } catch {}
       }
-      setItems(prev => reset ? out : [...prev, ...out]);
+      setItems(prev => (reset ? out : [...prev, ...out]).sort((a, b) => b.at - a.at));
       const nextOffset = offset + sessions.length;
       setArtifactOffset(nextOffset);
       setHasMore(sessions.length === ARTIFACT_SESSION_PAGE_SIZE && (typeof total !== 'number' || nextOffset < total));
@@ -642,7 +648,7 @@ const PATH_RE = /(^|[\s("'`])((?:MEDIA:)?(?:\/|~\/|\.\.?\/)[^\s"'`<>]+(?:\.[a-z0
 const IMAGE_EXT_RE = /\.(?:png|jpe?g|gif|webp|svg|bmp)(?:\?.*)?$/i;
 const FILE_EXT_RE = /\.(?:png|jpe?g|gif|webp|svg|bmp|pdf|txt|json|md|csv|zip|tar|gz|mp3|wav|mp4|mov)(?:\?.*)?$/i;
 
-function normalizeArtifactValue(value: string): string { return value.trim().replace(/[),.;]+$/, ''); }
+function normalizeArtifactValue(value: string): string { return value.trim().replace(/\\n/g, '').replace(/[\\),.;]+$/, ''); }
 function looksLikePathOrUrl(value: string): boolean { return /^(?:https?:\/\/|file:\/\/|data:image\/|MEDIA:|\/|\.\.?\/|~\/)/i.test(value); }
 function looksLikeArtifact(value: string): boolean { return /^(?:https?:\/\/|data:image\/)/i.test(value) || (looksLikePathOrUrl(value) && FILE_EXT_RE.test(value.replace(/^MEDIA:/, ''))); }
 function artifactKind(value: string): ArtifactKind { return IMAGE_EXT_RE.test(value.replace(/^MEDIA:/, '')) || value.startsWith('data:image/') ? 'image' : /^(?:https?:\/\/)/i.test(value) ? 'link' : 'file'; }
@@ -659,18 +665,19 @@ function artifactLabel(value: string): string {
 }
 function canOpenArtifact(value: string): boolean { return /^(?:https?:\/\/|data:image\/)/i.test(value.replace(/^MEDIA:/, '')); }
 
-function extractArtifactItems(raw: any, session: string): ArtifactItem[] {
+function extractArtifactItems(raw: any, session: string, sessionFallback = 0): ArtifactItem[] {
   const role = safeText(raw?.role).toLowerCase();
-  if (role === 'system') return [];
+  if (role !== 'user') return [];
   const msg = messageFromRaw(raw, 0);
   if (!isVisibleMessage(msg)) return [];
   const text = msg.text || safeText(raw?.content ?? raw?.text ?? raw?.message ?? '');
   if (!text || isInternalContextBlob(text)) return [];
+  const at = messageTime(raw, sessionFallback);
   const items: ArtifactItem[] = [];
   const add = (value: string) => {
     const clean = normalizeArtifactValue(value);
     if (!clean || !looksLikeArtifact(clean) || isInternalContextBlob(clean)) return;
-    items.push({ session, kind: artifactKind(clean), label: artifactLabel(clean), value: clean, href: artifactHref(clean), canOpen: canOpenArtifact(clean) });
+    items.push({ session, kind: artifactKind(clean), label: artifactLabel(clean), value: clean, href: artifactHref(clean), canOpen: canOpenArtifact(clean), at });
   };
   for (const match of text.matchAll(MARKDOWN_IMAGE_RE)) add(match[2] || '');
   for (const match of text.matchAll(MARKDOWN_LINK_RE)) {
