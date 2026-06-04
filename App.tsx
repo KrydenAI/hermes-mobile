@@ -21,7 +21,8 @@ type MessagePart =
   | NonTextPart;
 type Message = { id: string; role: MessageRole; text: string; at: number; parts?: MessagePart[] };
 type ArtifactKind = 'image' | 'file' | 'link';
-type ArtifactItem = { session: string; kind: ArtifactKind; label: string; value: string; href: string; canOpen: boolean; at: number };
+type ArtifactOrigin = 'given' | 'produced';
+type ArtifactItem = { session: string; kind: ArtifactKind; label: string; value: string; href: string; canOpen: boolean; at: number; origin: ArtifactOrigin };
 type Status = 'idle' | 'testing' | 'connected' | 'error';
 
 const tabs: { id: Exclude<Tab, 'home'>; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
@@ -49,6 +50,10 @@ function messageTime(raw: any, sessionFallback = 0): number {
   if (typeof direct === 'number') return direct > 1e12 ? direct : direct * 1000;
   const parsed = direct ? Date.parse(safeText(direct)) : 0;
   return Number.isFinite(parsed) && parsed > 0 ? parsed : sessionFallback || Date.now();
+}
+function formatArtifactTime(at: number): string {
+  if (!Number.isFinite(at) || at <= 0) return 'unknown time';
+  return new Date(at).toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 function sessionMessageCount(s: SessionSummary): number { return Number(s.message_count ?? (s as any).messages_count ?? 0) || 0; }
 function isEmptySession(s: SessionSummary): boolean { return sessionMessageCount(s) <= 0; }
@@ -620,7 +625,7 @@ function ArtifactsScreen({ rest }: { rest: HermesRestClient | null }) {
           const m = await rest.sessionMessages(sessionId(s));
           const messages = (m.messages || m || []).slice().reverse();
           for (const msg of messages) {
-            for (const item of extractArtifactItems(msg, titleOf(s), sessionTime(s))) {
+            for (const item of extractArtifactItems(msg, titleOf(s), sessionTime(s), isCronSession(s))) {
               const key = `${item.kind}:${item.value}`;
               if (seenRef.current.has(key)) continue;
               seenRef.current.add(key);
@@ -643,12 +648,21 @@ function ArtifactsScreen({ rest }: { rest: HermesRestClient | null }) {
 
 const MARKDOWN_IMAGE_RE = /!\[([^\]]*)\]\(([^)\s]+)\)/g;
 const MARKDOWN_LINK_RE = /\[([^\]]+)\]\(([^)\s]+)\)/g;
-const URL_RE = /https?:\/\/[^\s<>"')]+/g;
+const URL_RE = /https?:\/\/[^\s<>"')\]\*]+/g;
 const PATH_RE = /(^|[\s("'`])((?:MEDIA:)?(?:\/|~\/|\.\.?\/)[^\s"'`<>]+(?:\.[a-z0-9]{1,8})?)/gi;
 const IMAGE_EXT_RE = /\.(?:png|jpe?g|gif|webp|svg|bmp)(?:\?.*)?$/i;
 const FILE_EXT_RE = /\.(?:png|jpe?g|gif|webp|svg|bmp|pdf|txt|json|md|csv|zip|tar|gz|mp3|wav|mp4|mov)(?:\?.*)?$/i;
 
-function normalizeArtifactValue(value: string): string { return value.trim().replace(/\\n/g, '').replace(/[\\),.;]+$/, ''); }
+function normalizeArtifactValue(value: string): string {
+  return value
+    .trim()
+    .replace(/\\n/g, '')
+    .replace(/^\*+|\*+$/g, '')
+    .replace(/[\]}>]+$/g, '')
+    .replace(/[\\),.;]+$/g, '')
+    .replace(/^\*+|\*+$/g, '')
+    .trim();
+}
 function looksLikePathOrUrl(value: string): boolean { return /^(?:https?:\/\/|file:\/\/|data:image\/|MEDIA:|\/|\.\.?\/|~\/)/i.test(value); }
 function looksLikeArtifact(value: string): boolean { return /^(?:https?:\/\/|data:image\/)/i.test(value) || (looksLikePathOrUrl(value) && FILE_EXT_RE.test(value.replace(/^MEDIA:/, ''))); }
 function artifactKind(value: string): ArtifactKind { return IMAGE_EXT_RE.test(value.replace(/^MEDIA:/, '')) || value.startsWith('data:image/') ? 'image' : /^(?:https?:\/\/)/i.test(value) ? 'link' : 'file'; }
@@ -665,19 +679,22 @@ function artifactLabel(value: string): string {
 }
 function canOpenArtifact(value: string): boolean { return /^(?:https?:\/\/|data:image\/)/i.test(value.replace(/^MEDIA:/, '')); }
 
-function extractArtifactItems(raw: any, session: string, sessionFallback = 0): ArtifactItem[] {
+function extractArtifactItems(raw: any, session: string, sessionFallback = 0, allowHermesProduced = false): ArtifactItem[] {
   const role = safeText(raw?.role).toLowerCase();
-  if (role !== 'user') return [];
+  const isUserGiven = role === 'user';
+  const isHermesProduced = allowHermesProduced && role === 'assistant';
+  if (!isUserGiven && !isHermesProduced) return [];
   const msg = messageFromRaw(raw, 0);
   if (!isVisibleMessage(msg)) return [];
   const text = msg.text || safeText(raw?.content ?? raw?.text ?? raw?.message ?? '');
   if (!text || isInternalContextBlob(text)) return [];
   const at = messageTime(raw, sessionFallback);
+  const origin: ArtifactOrigin = isHermesProduced ? 'produced' : 'given';
   const items: ArtifactItem[] = [];
   const add = (value: string) => {
     const clean = normalizeArtifactValue(value);
     if (!clean || !looksLikeArtifact(clean) || isInternalContextBlob(clean)) return;
-    items.push({ session, kind: artifactKind(clean), label: artifactLabel(clean), value: clean, href: artifactHref(clean), canOpen: canOpenArtifact(clean), at });
+    items.push({ session, kind: artifactKind(clean), label: artifactLabel(clean), value: clean, href: artifactHref(clean), canOpen: canOpenArtifact(clean), at, origin });
   };
   for (const match of text.matchAll(MARKDOWN_IMAGE_RE)) add(match[2] || '');
   for (const match of text.matchAll(MARKDOWN_LINK_RE)) {
@@ -701,7 +718,7 @@ function ArtifactCard({ item }: { item: ArtifactItem }) {
     if (item.canOpen) await Linking.openURL(item.href);
     else await Clipboard.setStringAsync(item.value);
   };
-  return <Pressable onPress={open}><Card><View style={styles.rowBetween}><View style={{ flex: 1 }}><Text style={styles.eyebrow}>{item.kind}</Text><Text style={styles.listTitle} numberOfLines={1}>{item.label}</Text><Text style={styles.listSub} numberOfLines={1}>{item.session}</Text></View><Ionicons name={icon} size={24} color={colors.primary2} /></View><Text style={styles.muted} numberOfLines={2}>{item.value}</Text><View style={styles.row}><Button text={item.canOpen ? 'Open' : 'Copy path'} icon={item.canOpen ? 'open-outline' : 'copy-outline'} secondary onPress={open} /></View></Card></Pressable>;
+  return <Pressable onPress={open}><Card><View style={styles.rowBetween}><View style={{ flex: 1 }}><Text style={styles.eyebrow}>{item.kind}</Text><Text style={styles.listTitle} numberOfLines={1}>{item.label}</Text><Text style={styles.listSub} numberOfLines={1}>{item.session}</Text><Text style={styles.listSub}>{item.origin === 'produced' ? 'Produced' : 'Given'} {formatArtifactTime(item.at)}</Text></View><Ionicons name={icon} size={24} color={colors.primary2} /></View><Text style={styles.muted} numberOfLines={2}>{item.value}</Text><View style={styles.row}><Button text={item.canOpen ? 'Open' : 'Copy path'} icon={item.canOpen ? 'open-outline' : 'copy-outline'} secondary onPress={open} /></View></Card></Pressable>;
 }
 
 function OpsHubScreen({ setOpsScreen }: { setOpsScreen: (screen: OpsScreen) => void }) {
