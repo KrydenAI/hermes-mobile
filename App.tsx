@@ -5,10 +5,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
-import { CameraView, useCameraPermissions } from 'expo-camera';
-import QRCode from 'react-native-qrcode-svg';
 
-import { HermesRestClient, HermesRpcClient, normalizeBaseUrl, parsePairingPayload, prepareConnectionProfile } from './src/api/hermes';
+import { HermesRestClient, HermesRpcClient, normalizeBaseUrl, prepareConnectionProfile } from './src/api/hermes';
 import { deleteProfile, loadProfiles, upsertProfile } from './src/storage';
 import { colors, radius, shadow } from './src/theme';
 import type { ConnectionProfile, CronJob, HermesEvent, McpServer, SessionSummary, SkillInfo, ToolsetInfo } from './src/types';
@@ -20,7 +18,8 @@ type MessagePart =
   | { kind: 'text'; text: string }
   | { kind: 'tool' | 'skill'; name: string; status: ToolStatus; summary: string; detail?: string };
 type Message = { id: string; role: MessageRole; text: string; at: number; parts?: MessagePart[] };
-type ArtifactItem = { session: string; kind: 'media' | 'link' | 'file' | 'code'; title: string; value: string };
+type ArtifactKind = 'image' | 'file' | 'link';
+type ArtifactItem = { session: string; kind: ArtifactKind; label: string; value: string; href: string; canOpen: boolean };
 type Status = 'idle' | 'testing' | 'connected' | 'error';
 
 const tabs: { id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
@@ -265,8 +264,6 @@ function ConnectScreen({ profiles, active, status, error, statusPayload, onSelec
   const [token, setToken] = useState(active?.token || '');
   const [username, setUsername] = useState(active?.username || '');
   const [password, setPassword] = useState(active?.password || '');
-  const [showScanner, setShowScanner] = useState(false);
-  const pairingValue = `hermesmobile://connect?url=${encodeURIComponent(normalizeBaseUrl(baseUrl))}&token=${encodeURIComponent(token)}`;
   const setupCommand = 'hermes dashboard --tui --no-open --host <tailscale-or-lan-ip> --port 9119 --insecure';
   useEffect(() => { if (active) { setName(active.name); setBaseUrl(active.baseUrl); setToken(active.token || ''); setUsername(active.username || ''); setPassword(active.password || ''); } }, [active]);
 
@@ -281,7 +278,7 @@ function ConnectScreen({ profiles, active, status, error, statusPayload, onSelec
       <Text style={styles.sectionTitle}>Connect to Hermes</Text>
       <Label text="Profile name" /><Input value={name} onChangeText={setName} placeholder="My Hermes" />
       <Label text="Dashboard URL" /><Input value={baseUrl} onChangeText={setBaseUrl} autoCapitalize="none" placeholder="http://desktop.tailnet.ts.net:9119" />
-      <View style={styles.row}><Button icon="qr-code-outline" text="Scan QR" onPress={() => setShowScanner(true)} secondary /><Button icon="flash-outline" text={status === 'testing' ? 'Connecting...' : 'Save + Connect'} onPress={save} /></View>
+      <View style={styles.row}><Button icon="flash-outline" text={status === 'testing' ? 'Connecting...' : 'Save + Connect'} onPress={save} /></View>
       {error ? <Text style={styles.error}>{error}</Text> : null}
       {statusPayload ? <Text style={styles.success}>REST OK · {safeText(statusPayload.version || statusPayload.hermes_version || 'Hermes')} · {safeText(statusPayload.mobile_message || 'connected')}</Text> : null}
       <Label text="Session token (optional)" /><Input value={token} onChangeText={setToken} autoCapitalize="none" secureTextEntry placeholder="Usually auto-discovered" />
@@ -294,20 +291,8 @@ function ConnectScreen({ profiles, active, status, error, statusPayload, onSelec
       <Command text={setupCommand} />
       <View style={styles.row}><Button text="Open Tailscale" icon="open-outline" secondary onPress={() => Linking.openURL('https://tailscale.com/download')} /><Button text="Copy command" icon="copy-outline" secondary onPress={() => Clipboard.setStringAsync(setupCommand)} /></View>
     </Card>
-    <Card>
-      <Text style={styles.sectionTitle}>Pairing QR</Text>
-      <Text style={styles.muted}>Optional fallback.</Text>
-      <View style={styles.qrWrap}>{token ? <QRCode value={pairingValue} size={170} backgroundColor="transparent" color={colors.text} /> : <Text style={styles.muted}>A stored/advanced token can generate QR here.</Text>}</View>
-    </Card>
     {profiles.length ? <Card><Text style={styles.sectionTitle}>Saved backends</Text>{profiles.map((p: ConnectionProfile) => <Pressable key={p.id} style={styles.listItem} onPress={() => onSelect(p)}><View style={{ flex: 1 }}><Text style={styles.listTitle}>{p.name}</Text><Text style={styles.listSub}>{p.baseUrl} · {p.authMode || 'auto'}</Text></View><Pressable onPress={() => onDelete(p.id)}><Ionicons name="trash-outline" size={18} color={colors.bad} /></Pressable></Pressable>)}</Card> : null}
-    <Scanner visible={showScanner} onClose={() => setShowScanner(false)} onData={data => { const parsed = parsePairingPayload(data); if (parsed?.baseUrl) { setBaseUrl(parsed.baseUrl); setToken(parsed.token || ''); setShowScanner(false); } }} />
   </ScrollView>;
-}
-
-function Scanner({ visible, onClose, onData }: { visible: boolean; onClose: () => void; onData: (d: string) => void }) {
-  const [permission, requestPermission] = useCameraPermissions();
-  useEffect(() => { if (visible && !permission?.granted) requestPermission(); }, [visible, permission?.granted]);
-  return <Modal visible={visible} animationType="slide"><View style={styles.scanner}>{permission?.granted ? <CameraView style={StyleSheet.absoluteFill} barcodeScannerSettings={{ barcodeTypes: ['qr'] }} onBarcodeScanned={({ data }) => onData(data)} /> : <Text style={styles.text}>Camera permission required.</Text>}<Pressable style={styles.close} onPress={onClose}><Ionicons name="close" size={28} color={colors.text}/></Pressable></View></Modal>;
 }
 
 function ChatScreen({ rest, rpc, connected, activeSession, setActiveSession, messages, setMessages }: any) {
@@ -449,36 +434,69 @@ function ArtifactsScreen({ rest }: { rest: HermesRestClient | null }) {
     } finally { setLoading(false); }
   };
   useEffect(()=>{ load().catch(e=>setErr(e.message)); }, [rest]);
-  return <ScrollView contentContainerStyle={styles.screen}><Card><View style={styles.rowBetween}><View><Text style={styles.sectionTitle}>Artifacts</Text><Text style={styles.muted}>Files, links, MEDIA attachments, and code blocks shared with Hermes.</Text></View><Button text="Refresh" icon="refresh-outline" secondary onPress={load}/></View>{err ? <Text style={styles.error}>{err}</Text> : null}</Card>{loading ? <LoadingBlock label="Loading artifacts…" /> : items.length ? items.map((it,i)=><ArtifactCard key={`${it.kind}-${i}`} item={it} />) : <Empty title="No artifacts found" body="Shared files, links, MEDIA attachments, and code blocks will appear here." />}</ScrollView>;
+  return <ScrollView contentContainerStyle={styles.screen}><Card><View style={styles.rowBetween}><View><Text style={styles.sectionTitle}>Artifacts</Text><Text style={styles.muted}>Files, links, images, and MEDIA attachments shared with Hermes.</Text></View><Button text="Refresh" icon="refresh-outline" secondary onPress={load}/></View>{err ? <Text style={styles.error}>{err}</Text> : null}</Card>{loading ? <LoadingBlock label="Loading artifacts…" /> : items.length ? items.map((it,i)=><ArtifactCard key={`${it.kind}-${it.value}-${i}`} item={it} />) : <Empty title="No artifacts found" body="Shared files, links, images, and MEDIA attachments will appear here." />}</ScrollView>;
 }
+
+const MARKDOWN_IMAGE_RE = /!\[([^\]]*)\]\(([^)\s]+)\)/g;
+const MARKDOWN_LINK_RE = /\[([^\]]+)\]\(([^)\s]+)\)/g;
+const URL_RE = /https?:\/\/[^\s<>"')]+/g;
+const PATH_RE = /(^|[\s("'`])((?:MEDIA:)?(?:\/|~\/|\.\.?\/)[^\s"'`<>]+(?:\.[a-z0-9]{1,8})?)/gi;
+const IMAGE_EXT_RE = /\.(?:png|jpe?g|gif|webp|svg|bmp)(?:\?.*)?$/i;
+const FILE_EXT_RE = /\.(?:png|jpe?g|gif|webp|svg|bmp|pdf|txt|json|md|csv|zip|tar|gz|mp3|wav|mp4|mov)(?:\?.*)?$/i;
+
+function normalizeArtifactValue(value: string): string { return value.trim().replace(/[),.;]+$/, ''); }
+function looksLikePathOrUrl(value: string): boolean { return /^(?:https?:\/\/|file:\/\/|data:image\/|MEDIA:|\/|\.\.?\/|~\/)/i.test(value); }
+function looksLikeArtifact(value: string): boolean { return /^(?:https?:\/\/|data:image\/)/i.test(value) || (looksLikePathOrUrl(value) && FILE_EXT_RE.test(value.replace(/^MEDIA:/, ''))); }
+function artifactKind(value: string): ArtifactKind { return IMAGE_EXT_RE.test(value.replace(/^MEDIA:/, '')) || value.startsWith('data:image/') ? 'image' : /^(?:https?:\/\/)/i.test(value) ? 'link' : 'file'; }
+function artifactHref(value: string): string {
+  const clean = value.replace(/^MEDIA:/, '');
+  if (/^(?:https?:\/\/|file:\/\/|data:)/i.test(clean)) return clean;
+  if (clean.startsWith('/')) return `file://${encodeURI(clean)}`;
+  return clean;
+}
+function artifactLabel(value: string): string {
+  const clean = value.replace(/^MEDIA:/, '');
+  try { const url = new URL(clean); return url.pathname.split('/').filter(Boolean).pop() || clean; }
+  catch { return clean.split(/[\\/]/).filter(Boolean).pop() || clean; }
+}
+function canOpenArtifact(value: string): boolean { return /^(?:https?:\/\/|data:image\/)/i.test(value.replace(/^MEDIA:/, '')); }
 
 function extractArtifactItems(raw: any, session: string): ArtifactItem[] {
   const role = safeText(raw?.role).toLowerCase();
-  if (role === 'system' || role === 'tool') return [];
+  if (role === 'system') return [];
   const msg = messageFromRaw(raw, 0);
   if (!isVisibleMessage(msg)) return [];
   const text = msg.text || safeText(raw?.content ?? raw?.text ?? raw?.message ?? '');
   if (!text || isInternalContextBlob(text)) return [];
   const items: ArtifactItem[] = [];
-  const add = (kind: ArtifactItem['kind'], value: string, title?: string) => {
-    const clean = value.trim().replace(/[),.;]+$/, '');
-    if (!clean || isInternalContextBlob(clean)) return;
-    items.push({ session, kind, title: title || kind.toUpperCase(), value: clean.slice(0, 1800) });
+  const add = (value: string) => {
+    const clean = normalizeArtifactValue(value);
+    if (!clean || !looksLikeArtifact(clean) || isInternalContextBlob(clean)) return;
+    items.push({ session, kind: artifactKind(clean), label: artifactLabel(clean), value: clean, href: artifactHref(clean), canOpen: canOpenArtifact(clean) });
   };
-  for (const match of text.matchAll(/MEDIA:([^\s)]+)/g)) add('media', `MEDIA:${match[1]}`, 'MEDIA attachment');
-  for (const match of text.matchAll(/https?:\/\/[^\s)]+/g)) add('link', match[0], 'Link');
-  for (const match of text.matchAll(/```([\s\S]*?)```/g)) add('code', match[0].slice(0, 1800), 'Code block');
-  for (const match of text.matchAll(/(?:~|\/|[A-Za-z]:\\)[^\n\r\t`<>|]+\.(?:png|jpe?g|webp|gif|mp4|mov|mp3|wav|pdf|csv|json|md|txt|zip|tsx?|jsx?|py|sh|html|css)\b/g)) add('file', match[0], 'File path');
+  for (const match of text.matchAll(MARKDOWN_IMAGE_RE)) add(match[2] || '');
+  for (const match of text.matchAll(MARKDOWN_LINK_RE)) {
+    const start = match.index ?? 0;
+    if (start > 0 && text[start - 1] === '!') continue;
+    add(match[2] || '');
+  }
+  for (const match of text.matchAll(URL_RE)) add(match[0] || '');
+  for (const match of text.matchAll(/MEDIA:([^\s)]+)/g)) add(`MEDIA:${match[1]}`);
+  for (const match of text.matchAll(PATH_RE)) add(match[2] || '');
   const directUrl = safeText(raw?.url || raw?.href || raw?.link);
   const directPath = safeText(raw?.path || raw?.file_path || raw?.filename);
-  if (/^https?:\/\//i.test(directUrl)) add('link', directUrl, 'Link');
-  if (directPath) add(directPath.startsWith('MEDIA:') ? 'media' : 'file', directPath, directPath.startsWith('MEDIA:') ? 'MEDIA attachment' : 'File path');
+  if (directUrl) add(directUrl);
+  if (directPath) add(directPath);
   return items;
 }
 
 function ArtifactCard({ item }: { item: ArtifactItem }) {
-  const icon: keyof typeof Ionicons.glyphMap = item.kind === 'media' ? 'image-outline' : item.kind === 'link' ? 'link-outline' : item.kind === 'code' ? 'code-slash-outline' : 'document-attach-outline';
-  return <Card><View style={styles.rowBetween}><View style={{ flex: 1 }}><Text style={styles.eyebrow}>{item.session}</Text><Text style={styles.listTitle}>{item.title}</Text></View><Ionicons name={icon} size={22} color={colors.primary2} /></View><Text style={item.kind === 'code' ? styles.code : styles.text}>{item.value}</Text></Card>;
+  const icon: keyof typeof Ionicons.glyphMap = item.kind === 'image' ? 'image-outline' : item.kind === 'link' ? 'link-outline' : 'document-attach-outline';
+  const open = async () => {
+    if (item.canOpen) await Linking.openURL(item.href);
+    else await Clipboard.setStringAsync(item.value);
+  };
+  return <Pressable onPress={open}><Card><View style={styles.rowBetween}><View style={{ flex: 1 }}><Text style={styles.eyebrow}>{item.kind}</Text><Text style={styles.listTitle} numberOfLines={1}>{item.label}</Text><Text style={styles.listSub} numberOfLines={1}>{item.session}</Text></View><Ionicons name={icon} size={24} color={colors.primary2} /></View><Text style={styles.muted} numberOfLines={2}>{item.value}</Text><View style={styles.row}><Button text={item.canOpen ? 'Open' : 'Copy path'} icon={item.canOpen ? 'open-outline' : 'copy-outline'} secondary onPress={open} /></View></Card></Pressable>;
 }
 
 function SkillsScreen({ rest }: { rest: HermesRestClient | null }) {
@@ -530,10 +548,10 @@ const styles = StyleSheet.create({
   card: { backgroundColor:'rgba(17,24,47,0.82)', borderWidth:1, borderColor: colors.stroke, borderRadius: radius.lg, padding:14, gap:10, ...shadow }, sectionTitle:{color:colors.text,fontSize:20,fontWeight:'800',letterSpacing:-0.4}, muted:{color:colors.muted,lineHeight:21}, mutedCenter:{color:colors.muted,lineHeight:21,textAlign:'center'}, text:{color:colors.text,lineHeight:21}, error:{color:colors.bad,fontWeight:'700'}, errorInline:{color:colors.bad,fontWeight:'700',paddingHorizontal:14,paddingBottom:6}, success:{color:colors.good,fontWeight:'700'}, label:{color:colors.muted,fontSize:12,fontWeight:'800',textTransform:'uppercase',letterSpacing:0.8},
   input:{backgroundColor:'rgba(255,255,255,0.055)', borderWidth:1, borderColor:colors.stroke, borderRadius:radius.md, paddingHorizontal:14, paddingVertical:12, color:colors.text, fontSize:15},
   row:{flexDirection:'row', gap:10, flexWrap:'wrap'}, rowBetween:{flexDirection:'row',justifyContent:'space-between',alignItems:'center',gap:12}, button:{backgroundColor:colors.primary, paddingHorizontal:14, paddingVertical:12, borderRadius:radius.md, flexDirection:'row',alignItems:'center',gap:7, justifyContent:'center'}, buttonSecondary:{backgroundColor:'rgba(255,255,255,0.08)', borderWidth:1,borderColor:colors.stroke}, buttonText:{color:colors.text,fontWeight:'800'},
-  qrWrap:{alignItems:'center',justifyContent:'center',padding:16,borderRadius:radius.lg,backgroundColor:'rgba(255,255,255,0.05)'}, code:{fontFamily:Platform.select({ios:'Menlo',android:'monospace',default:'monospace'}), color:'#dbeafe', backgroundColor:'rgba(0,0,0,0.35)', borderRadius:radius.md, padding:12, overflow:'hidden', lineHeight:19},
+  code:{fontFamily:Platform.select({ios:'Menlo',android:'monospace',default:'monospace'}), color:'#dbeafe', backgroundColor:'rgba(0,0,0,0.35)', borderRadius:radius.md, padding:12, overflow:'hidden', lineHeight:19},
   listItem:{borderWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(255,255,255,0.035)',borderRadius:radius.md,padding:13,flexDirection:'row',alignItems:'center',justifyContent:'space-between',gap:12}, selected:{borderColor:colors.primary2,backgroundColor:'rgba(34,211,238,0.08)'}, listTitle:{color:colors.text,fontSize:16,fontWeight:'800'}, listSub:{color:colors.muted,fontSize:12,marginTop:3},
   tabs:{maxHeight:82,borderTopWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(5,7,13,0.92)'}, tabsInner:{padding:10,gap:8}, tab:{alignItems:'center',justifyContent:'center',gap:3,paddingHorizontal:12,paddingVertical:8,borderRadius:radius.md,borderWidth:1,borderColor:'transparent',minWidth:78}, tabActive:{backgroundColor:'rgba(139,92,246,0.22)',borderColor:'rgba(139,92,246,0.45)'}, tabText:{color:colors.muted,fontSize:11,fontWeight:'800'},
-  scanner:{flex:1,backgroundColor:'#000',alignItems:'center',justifyContent:'center'}, close:{position:'absolute',top:55,right:20,backgroundColor:'rgba(0,0,0,0.5)',borderRadius:999,padding:10}, toggle:{width:48,height:28,borderRadius:999,backgroundColor:'rgba(255,255,255,0.14)',padding:3}, toggleOn:{backgroundColor:colors.primary}, knob:{width:22,height:22,borderRadius:99,backgroundColor:colors.text}, knobOn:{transform:[{translateX:20}]},
+  toggle:{width:48,height:28,borderRadius:999,backgroundColor:'rgba(255,255,255,0.14)',padding:3}, toggleOn:{backgroundColor:colors.primary}, knob:{width:22,height:22,borderRadius:99,backgroundColor:colors.text}, knobOn:{transform:[{translateX:20}]},
   loading:{borderWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(255,255,255,0.035)',borderRadius:radius.lg,padding:20,gap:10,alignItems:'center',justifyContent:'center'},
   chatRoot:{flex:1}, chatTopBar:{flexDirection:'row',alignItems:'center',gap:10,paddingHorizontal:12,paddingVertical:10,borderBottomWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(5,7,13,0.55)'}, iconButton:{width:42,height:42,borderRadius:99,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(255,255,255,0.06)',borderWidth:1,borderColor:colors.stroke}, chatTitle:{color:colors.text,fontSize:18,fontWeight:'900'}, chatSub:{color:colors.muted,fontSize:12,marginTop:2}, chatMessages:{padding:14,paddingBottom:28,gap:8,minHeight:'100%'}, centerPane:{flex:1,minHeight:420,alignItems:'center',justifyContent:'center',gap:10,paddingHorizontal:30},
   composer:{flexDirection:'row',alignItems:'flex-end',gap:10,padding:12,borderTopWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(5,7,13,0.96)'}, composerInput:{flex:1,maxHeight:130,backgroundColor:'rgba(255,255,255,0.06)',borderWidth:1,borderColor:colors.stroke,borderRadius:22,paddingHorizontal:15,paddingVertical:11,color:colors.text}, send:{backgroundColor:colors.primary,borderRadius:99,width:46,height:46,alignItems:'center',justifyContent:'center'},
