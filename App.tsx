@@ -111,6 +111,15 @@ function parseMessageParts(content: any, role: MessageRole): MessagePart[] {
     return parts;
   }
 
+  if (role === 'tool') {
+    const text = safeText(content).trim();
+    let parsed: any = null;
+    try { parsed = text ? JSON.parse(text) : null; } catch {}
+    const name = safeText(parsed?.toolName || parsed?.tool_name || parsed?.name || parsed?.recipient_name || 'tool result');
+    parts.push({ kind: toolKind(name), name, status: parsed?.error ? 'error' : 'done', summary: toolSummary(name, parsed?.args || parsed?.input, parsed || text), detail: parsed?.error ? safeText(parsed.error).slice(0, 700) : undefined });
+    return parts;
+  }
+
   pushText(content);
   return parts;
 }
@@ -150,6 +159,7 @@ export default function App() {
   const [error, setError] = useState('');
   const [events, setEvents] = useState<HermesEvent[]>([]);
   const [activeSession, setActiveSession] = useState('');
+  const [activeRuntimeSession, setActiveRuntimeSession] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
   const rpcRef = useRef<HermesRpcClient | null>(null);
 
@@ -224,7 +234,7 @@ export default function App() {
           <Header profile={profile} status={status} />
           <View style={styles.body}>
             {tab === 'home' && <ConnectScreen profiles={profiles} active={profile} status={status} error={error} statusPayload={statusPayload} onSelect={setProfile} onSave={async (p: ConnectionProfile) => { setProfile(p); setProfiles(await upsertProfile(p)); await connect(p); }} onDelete={async (id: string) => { setProfiles(await deleteProfile(id)); if (profile?.id === id) setProfile(null); }} />}
-            {tab === 'chat' && <ChatScreen rest={rest} rpc={rpcRef.current} connected={status === 'connected'} activeSession={activeSession} setActiveSession={setActiveSession} messages={messages} setMessages={setMessages} />}
+            {tab === 'chat' && <ChatScreen rest={rest} rpc={rpcRef.current} connected={status === 'connected'} activeSession={activeSession} setActiveSession={setActiveSession} activeRuntimeSession={activeRuntimeSession} setActiveRuntimeSession={setActiveRuntimeSession} messages={messages} setMessages={setMessages} />}
             {tab === 'approvals' && <ApprovalsScreen rpc={rpcRef.current} events={events} activeSession={activeSession} />}
             {tab === 'artifacts' && <ArtifactsScreen rest={rest} />}
             {tab === 'skills' && <SkillsScreen rest={rest} />}
@@ -295,7 +305,7 @@ function ConnectScreen({ profiles, active, status, error, statusPayload, onSelec
   </ScrollView>;
 }
 
-function ChatScreen({ rest, rpc, connected, activeSession, setActiveSession, messages, setMessages }: any) {
+function ChatScreen({ rest, rpc, connected, activeSession, setActiveSession, activeRuntimeSession, setActiveRuntimeSession, messages, setMessages }: any) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [prompt, setPrompt] = useState('');
@@ -304,6 +314,8 @@ function ChatScreen({ rest, rpc, connected, activeSession, setActiveSession, mes
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [err, setErr] = useState('');
   const visibleMessages = messages.filter(isVisibleMessage);
+  const storedIdFromRpc = (r: any) => safeText(r?.stored_session_id || r?.session_key || r?.resumed || r?.id || r?.session_id);
+  const runtimeIdFromRpc = (r: any) => safeText(r?.session_id || r?.runtime_session_id || r?.id);
 
   const refresh = async () => {
     if (!rest) return;
@@ -317,33 +329,60 @@ function ChatScreen({ rest, rpc, connected, activeSession, setActiveSession, mes
 
   const openSession = async (sid: string) => {
     setActiveSession(sid);
+    setActiveRuntimeSession('');
     setDrawerOpen(false);
-    if (!rest) return;
     setLoadingMessages(true); setErr('');
     try {
-      const data = await rest.sessionMessages(sid);
-      setMessages(normalizeMessages(data));
-    } catch (e: any) { setErr(e.message); }
+      if (rpc) {
+        const resumed: any = await rpc.resumeSession(sid);
+        const stored = storedIdFromRpc(resumed) || sid;
+        setActiveSession(stored);
+        setActiveRuntimeSession(runtimeIdFromRpc(resumed));
+        setMessages(normalizeMessages(resumed?.messages || []));
+      } else if (rest) {
+        const data = await rest.sessionMessages(sid);
+        setMessages(normalizeMessages(data));
+      }
+    } catch (e: any) {
+      try {
+        if (rest) {
+          const data = await rest.sessionMessages(sid);
+          setMessages(normalizeMessages(data));
+        }
+        setErr('');
+      } catch { setErr(e.message); setMessages([]); }
+    }
     finally { setLoadingMessages(false); }
   };
 
   const newSession = async () => {
     if (!rpc) return;
     const r: any = await rpc.createSession();
-    const sid = r.session_id || r.id;
-    setActiveSession(sid); setMessages([]); setDrawerOpen(false); await refresh();
+    const stored = storedIdFromRpc(r);
+    const runtime = runtimeIdFromRpc(r);
+    setActiveSession(stored || runtime);
+    setActiveRuntimeSession(runtime);
+    setMessages([]); setDrawerOpen(false); await refresh();
   };
 
   const submit = async () => {
     if (!rpc || !prompt.trim()) return;
-    let sid = activeSession;
+    let storedSid = activeSession;
+    let runtimeSid = activeRuntimeSession;
     setBusy(true); setErr('');
     try {
-      if (!sid) { const r: any = await rpc.createSession(); sid = r.session_id || r.id; setActiveSession(sid); }
+      if (!runtimeSid) {
+        const r: any = storedSid ? await rpc.resumeSession(storedSid) : await rpc.createSession();
+        runtimeSid = runtimeIdFromRpc(r);
+        storedSid = storedIdFromRpc(r) || storedSid || runtimeSid;
+        setActiveRuntimeSession(runtimeSid);
+        setActiveSession(storedSid);
+        if (r?.messages) setMessages(normalizeMessages(r.messages));
+      }
       const text = prompt.trim();
       setMessages((m: Message[]) => [...m, { id: makeId(), role: 'user', text, parts: [{ kind: 'text', text }], at: Date.now() }]);
       setPrompt('');
-      await rpc.submitPrompt(sid, text);
+      await rpc.submitPrompt(runtimeSid, text);
       await refresh();
     } catch(e:any){ setErr(e.message); }
     finally { setBusy(false); }
