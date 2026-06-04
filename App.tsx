@@ -20,6 +20,7 @@ type MessagePart =
   | { kind: 'text'; text: string }
   | { kind: 'tool' | 'skill'; name: string; status: ToolStatus; summary: string; detail?: string };
 type Message = { id: string; role: MessageRole; text: string; at: number; parts?: MessagePart[] };
+type ArtifactItem = { session: string; kind: 'media' | 'link' | 'file' | 'code'; title: string; value: string };
 type Status = 'idle' | 'testing' | 'connected' | 'error';
 
 const tabs: { id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
@@ -422,10 +423,62 @@ function ApprovalsScreen({ rpc, events, activeSession }: any) {
 }
 
 function ArtifactsScreen({ rest }: { rest: HermesRestClient | null }) {
-  const [items, setItems] = useState<any[]>([]); const [err, setErr] = useState(''); const [loading, setLoading] = useState(false);
-  const load = async () => { if (!rest) return; setLoading(true); try { const data = await rest.sessions(10); const sessions = Array.isArray(data) ? data : data.sessions || []; const out:any[]=[]; for (const s of sessions.slice(0,5)) { try { const m = await rest.sessionMessages(sessionId(s)); for (const msg of (m.messages || m || []).slice(-20)) { const text = safeText(msg.content || msg.text || msg); if (/MEDIA:|```|artifact|file|path/i.test(text)) out.push({ session: titleOf(s), text: text.slice(0,900) }); } } catch {} } setItems(out); } finally { setLoading(false); } };
+  const [items, setItems] = useState<ArtifactItem[]>([]); const [err, setErr] = useState(''); const [loading, setLoading] = useState(false);
+  const load = async () => {
+    if (!rest) return;
+    setLoading(true);
+    try {
+      const data = await rest.sessions(12);
+      const sessions = Array.isArray(data) ? data : data.sessions || [];
+      const seen = new Set<string>();
+      const out: ArtifactItem[] = [];
+      for (const s of sessions.slice(0, 8)) {
+        try {
+          const m = await rest.sessionMessages(sessionId(s));
+          for (const msg of (m.messages || m || []).slice(-40)) {
+            for (const item of extractArtifactItems(msg, titleOf(s))) {
+              const key = `${item.kind}:${item.value}`;
+              if (seen.has(key)) continue;
+              seen.add(key);
+              out.push(item);
+            }
+          }
+        } catch {}
+      }
+      setItems(out.slice(0, 80));
+    } finally { setLoading(false); }
+  };
   useEffect(()=>{ load().catch(e=>setErr(e.message)); }, [rest]);
-  return <ScrollView contentContainerStyle={styles.screen}><Card><View style={styles.rowBetween}><View><Text style={styles.sectionTitle}>Artifacts</Text><Text style={styles.muted}>Files, previews, MEDIA attachments, and code blocks from recent sessions.</Text></View><Button text="Refresh" icon="refresh-outline" secondary onPress={load}/></View>{err ? <Text style={styles.error}>{err}</Text> : null}</Card>{loading ? <LoadingBlock label="Loading artifacts…" /> : items.length ? items.map((it,i)=><Card key={i}><Text style={styles.eyebrow}>{it.session}</Text><Text style={styles.text}>{it.text}</Text></Card>) : <Empty title="No artifacts found" body="Run sessions with files or code blocks and they will surface here." />}</ScrollView>;
+  return <ScrollView contentContainerStyle={styles.screen}><Card><View style={styles.rowBetween}><View><Text style={styles.sectionTitle}>Artifacts</Text><Text style={styles.muted}>Files, links, MEDIA attachments, and code blocks shared with Hermes.</Text></View><Button text="Refresh" icon="refresh-outline" secondary onPress={load}/></View>{err ? <Text style={styles.error}>{err}</Text> : null}</Card>{loading ? <LoadingBlock label="Loading artifacts…" /> : items.length ? items.map((it,i)=><ArtifactCard key={`${it.kind}-${i}`} item={it} />) : <Empty title="No artifacts found" body="Shared files, links, MEDIA attachments, and code blocks will appear here." />}</ScrollView>;
+}
+
+function extractArtifactItems(raw: any, session: string): ArtifactItem[] {
+  const role = safeText(raw?.role).toLowerCase();
+  if (role === 'system' || role === 'tool') return [];
+  const msg = messageFromRaw(raw, 0);
+  if (!isVisibleMessage(msg)) return [];
+  const text = msg.text || safeText(raw?.content ?? raw?.text ?? raw?.message ?? '');
+  if (!text || isInternalContextBlob(text)) return [];
+  const items: ArtifactItem[] = [];
+  const add = (kind: ArtifactItem['kind'], value: string, title?: string) => {
+    const clean = value.trim().replace(/[),.;]+$/, '');
+    if (!clean || isInternalContextBlob(clean)) return;
+    items.push({ session, kind, title: title || kind.toUpperCase(), value: clean.slice(0, 1800) });
+  };
+  for (const match of text.matchAll(/MEDIA:([^\s)]+)/g)) add('media', `MEDIA:${match[1]}`, 'MEDIA attachment');
+  for (const match of text.matchAll(/https?:\/\/[^\s)]+/g)) add('link', match[0], 'Link');
+  for (const match of text.matchAll(/```([\s\S]*?)```/g)) add('code', match[0].slice(0, 1800), 'Code block');
+  for (const match of text.matchAll(/(?:~|\/|[A-Za-z]:\\)[^\n\r\t`<>|]+\.(?:png|jpe?g|webp|gif|mp4|mov|mp3|wav|pdf|csv|json|md|txt|zip|tsx?|jsx?|py|sh|html|css)\b/g)) add('file', match[0], 'File path');
+  const directUrl = safeText(raw?.url || raw?.href || raw?.link);
+  const directPath = safeText(raw?.path || raw?.file_path || raw?.filename);
+  if (/^https?:\/\//i.test(directUrl)) add('link', directUrl, 'Link');
+  if (directPath) add(directPath.startsWith('MEDIA:') ? 'media' : 'file', directPath, directPath.startsWith('MEDIA:') ? 'MEDIA attachment' : 'File path');
+  return items;
+}
+
+function ArtifactCard({ item }: { item: ArtifactItem }) {
+  const icon: keyof typeof Ionicons.glyphMap = item.kind === 'media' ? 'image-outline' : item.kind === 'link' ? 'link-outline' : item.kind === 'code' ? 'code-slash-outline' : 'document-attach-outline';
+  return <Card><View style={styles.rowBetween}><View style={{ flex: 1 }}><Text style={styles.eyebrow}>{item.session}</Text><Text style={styles.listTitle}>{item.title}</Text></View><Ionicons name={icon} size={22} color={colors.primary2} /></View><Text style={item.kind === 'code' ? styles.code : styles.text}>{item.value}</Text></Card>;
 }
 
 function SkillsScreen({ rest }: { rest: HermesRestClient | null }) {
