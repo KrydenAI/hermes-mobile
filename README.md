@@ -20,7 +20,9 @@
 
 ## Backend requirement
 
-Hermes Mobile talks to the standard Hermes dashboard backend. Start Hermes with TUI/chat support and a stable session token:
+Hermes Mobile talks to the standard Hermes dashboard backend. Hermes Desktop can auto-start a private dashboard only when it is running on the same machine as Hermes Agent. A phone cannot start a process on your computer, so Mobile makes this explicit in the first-run setup wizard: start the backend once, then connect by URL + token.
+
+Start Hermes with TUI/chat support and a stable session token:
 
 ```bash
 # Generate a stable private token; do not publish it.

@@ -142,28 +142,34 @@ function ConnectScreen({ profiles, active, status, error, statusPayload, onSelec
   const [token, setToken] = useState(active?.token || '');
   const [showScanner, setShowScanner] = useState(false);
   const pairingValue = `hermesmobile://connect?url=${encodeURIComponent(normalizeBaseUrl(baseUrl))}&token=${encodeURIComponent(token)}`;
+  const setupCommand = 'TOKEN=$(openssl rand -base64 32)\nprintf "HERMES_DASHBOARD_SESSION_TOKEN=%s\\n" "$TOKEN" >> ~/.hermes/.env\nchmod 600 ~/.hermes/.env\nhermes dashboard --tui --no-open --insecure --host <tailscale-or-lan-ip> --port 9119';
   useEffect(() => { if (active) { setName(active.name); setBaseUrl(active.baseUrl); setToken(active.token); } }, [active]);
 
   const save = () => onSave({ id: active?.id || makeId(), name: name.trim() || 'Hermes', baseUrl: normalizeBaseUrl(baseUrl), token: token.trim(), createdAt: active?.createdAt || Date.now(), lastUsedAt: Date.now() });
 
   return <ScrollView contentContainerStyle={styles.screen}>
     <Card>
+      <Text style={styles.sectionTitle}>First: start your Hermes backend</Text>
+      <Text style={styles.muted}>Desktop auto-starts a private dashboard only on the same machine as Hermes Agent. Mobile controls another machine, so start that machine's dashboard once, then connect below by URL + token. No plugin. No Kryden cloud.</Text>
+    </Card>
+    <Card>
       <Text style={styles.sectionTitle}>Connect to your Hermes Agent</Text>
-      <Text style={styles.muted}>This app uses the existing Hermes dashboard backend. No Kryden cloud and no required plugin. First job: connect your phone to your own agent.</Text>
+      <Text style={styles.muted}>After the backend is running, this is the only connection info Hermes Mobile needs.</Text>
       <Label text="Profile name" /><Input value={name} onChangeText={setName} placeholder="My Hermes" />
       <Label text="Backend URL" /><Input value={baseUrl} onChangeText={setBaseUrl} autoCapitalize="none" placeholder="http://desktop.tailnet.ts.net:9119" />
-      <Label text="Dashboard session token" /><Input value={token} onChangeText={setToken} autoCapitalize="none" secureTextEntry placeholder="Paste token" />
       <View style={styles.row}><Button icon="qr-code-outline" text="Scan QR" onPress={() => setShowScanner(true)} secondary /><Button icon="flash-outline" text={status === 'testing' ? 'Testing...' : 'Save + Connect'} onPress={save} /></View>
       {error ? <Text style={styles.error}>{error}</Text> : null}
       {statusPayload ? <Text style={styles.success}>REST OK · {String(statusPayload.version || statusPayload.hermes_version || 'Hermes')}</Text> : null}
+      <Label text="Dashboard session token" /><Input value={token} onChangeText={setToken} autoCapitalize="none" secureTextEntry placeholder="Paste token" />
     </Card>
     <Card>
-      <Text style={styles.sectionTitle}>Tailscale remote access assistant</Text>
+      <Text style={styles.sectionTitle}>1-2-3 backend setup</Text>
+      <Text style={styles.muted}>Use this if the URL/token fields above do not mean anything yet. Tailscale is the recommended secure remote path.</Text>
       <Step n="1" text="Install Tailscale on the computer running Hermes and on this phone." />
       <Step n="2" text="Sign into the same tailnet. Copy the computer's MagicDNS name or 100.x IP." />
       <Step n="3" text="Run Hermes with --tui, a stable token, and host set to the Tailscale/LAN IP. Do not expose this publicly." />
-      <Command text={'TOKEN=$(openssl rand -base64 32)\nprintf "HERMES_DASHBOARD_SESSION_TOKEN=%s\\n" "$TOKEN" >> ~/.hermes/.env\nchmod 600 ~/.hermes/.env\nhermes dashboard --tui --no-open --insecure --host <tailscale-or-lan-ip> --port 9119'} />
-      <View style={styles.row}><Button text="Open Tailscale" icon="open-outline" secondary onPress={() => Linking.openURL('https://tailscale.com/download')} /><Button text="Copy command" icon="copy-outline" secondary onPress={() => Clipboard.setStringAsync('TOKEN=$(openssl rand -base64 32)\nprintf "HERMES_DASHBOARD_SESSION_TOKEN=%s\\n" "$TOKEN" >> ~/.hermes/.env\nchmod 600 ~/.hermes/.env\nhermes dashboard --tui --no-open --insecure --host <tailscale-or-lan-ip> --port 9119')} /></View>
+      <Command text={setupCommand} />
+      <View style={styles.row}><Button text="Open Tailscale" icon="open-outline" secondary onPress={() => Linking.openURL('https://tailscale.com/download')} /><Button text="Copy command" icon="copy-outline" secondary onPress={() => Clipboard.setStringAsync(setupCommand)} /></View>
     </Card>
     <Card>
       <Text style={styles.sectionTitle}>Pairing QR</Text>
@@ -173,6 +179,10 @@ function ConnectScreen({ profiles, active, status, error, statusPayload, onSelec
     {profiles.length ? <Card><Text style={styles.sectionTitle}>Saved backends</Text>{profiles.map((p: ConnectionProfile) => <Pressable key={p.id} style={styles.listItem} onPress={() => onSelect(p)}><View><Text style={styles.listTitle}>{p.name}</Text><Text style={styles.listSub}>{p.baseUrl}</Text></View><Pressable onPress={() => onDelete(p.id)}><Ionicons name="trash-outline" size={18} color={colors.bad} /></Pressable></Pressable>)}</Card> : null}
     <Scanner visible={showScanner} onClose={() => setShowScanner(false)} onData={data => { const parsed = parsePairingPayload(data); if (parsed?.baseUrl) { setBaseUrl(parsed.baseUrl); setToken(parsed.token || ''); setShowScanner(false); } }} />
   </ScrollView>;
+}
+
+function MiniPath({ icon, title, body }: { icon: keyof typeof Ionicons.glyphMap; title: string; body: string }) {
+  return <View style={styles.miniPath}><Ionicons name={icon} size={22} color={colors.primary2} /><Text style={styles.listTitle}>{title}</Text><Text style={styles.listSub}>{body}</Text></View>;
 }
 
 function Hero() { return <LinearGradient colors={[colors.primary, '#1d4ed8', colors.primary2]} start={{x:0,y:0}} end={{x:1,y:1}} style={styles.hero}><Text style={styles.heroText}>The phone-native control surface for Hermes Agent.</Text><Text style={styles.heroSub}>Chat, approvals, crons, skills, MCP, artifacts — local-first.</Text></LinearGradient>; }
@@ -237,6 +247,9 @@ const styles = StyleSheet.create({
   screen: { padding: 14, paddingBottom: 170, gap: 12 }, hero: { borderRadius: radius.xl, padding: 18, minHeight: 116, justifyContent:'flex-end', ...shadow }, heroText:{color:colors.text,fontSize:27,fontWeight:'900',letterSpacing:-1.2}, heroSub:{color:'rgba(255,255,255,0.82)',fontSize:14,marginTop:6},
   card: { backgroundColor:'rgba(17,24,47,0.82)', borderWidth:1, borderColor: colors.stroke, borderRadius: radius.lg, padding:14, gap:10, ...shadow }, sectionTitle:{color:colors.text,fontSize:20,fontWeight:'800',letterSpacing:-0.4}, muted:{color:colors.muted,lineHeight:21}, text:{color:colors.text,lineHeight:21}, error:{color:colors.bad,fontWeight:'700'}, success:{color:colors.good,fontWeight:'700'}, label:{color:colors.muted,fontSize:12,fontWeight:'800',textTransform:'uppercase',letterSpacing:0.8},
   input:{backgroundColor:'rgba(255,255,255,0.055)', borderWidth:1, borderColor:colors.stroke, borderRadius:radius.md, paddingHorizontal:14, paddingVertical:12, color:colors.text, fontSize:15},
+  callout:{flexDirection:'row',gap:10,alignItems:'flex-start',borderWidth:1,borderColor:'rgba(34,211,238,0.24)',backgroundColor:'rgba(34,211,238,0.08)',borderRadius:radius.md,padding:12},
+  setupGrid:{flexDirection:'row',gap:10,flexWrap:'wrap'},
+  miniPath:{flex:1,minWidth:145,borderWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(255,255,255,0.04)',borderRadius:radius.md,padding:12,gap:6},
   row:{flexDirection:'row', gap:10, flexWrap:'wrap'}, rowBetween:{flexDirection:'row',justifyContent:'space-between',alignItems:'center',gap:12}, button:{backgroundColor:colors.primary, paddingHorizontal:14, paddingVertical:12, borderRadius:radius.md, flexDirection:'row',alignItems:'center',gap:7, justifyContent:'center'}, buttonSecondary:{backgroundColor:'rgba(255,255,255,0.08)', borderWidth:1,borderColor:colors.stroke}, buttonText:{color:colors.text,fontWeight:'800'},
   qrWrap:{alignItems:'center',justifyContent:'center',padding:16,borderRadius:radius.lg,backgroundColor:'rgba(255,255,255,0.05)'}, step:{flexDirection:'row',gap:10,alignItems:'flex-start'}, stepNum:{backgroundColor:colors.primary,color:colors.text,borderRadius:99,overflow:'hidden',width:24,height:24,textAlign:'center',lineHeight:24,fontWeight:'900'}, code:{fontFamily:Platform.select({ios:'Menlo',android:'monospace',default:'monospace'}), color:'#dbeafe', backgroundColor:'rgba(0,0,0,0.35)', borderRadius:radius.md, padding:12, overflow:'hidden', lineHeight:19},
   listItem:{borderWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(255,255,255,0.035)',borderRadius:radius.md,padding:13,flexDirection:'row',alignItems:'center',justifyContent:'space-between',gap:12}, selected:{borderColor:colors.primary2,backgroundColor:'rgba(34,211,238,0.08)'}, listTitle:{color:colors.text,fontSize:16,fontWeight:'800'}, listSub:{color:colors.muted,fontSize:12,marginTop:3},
