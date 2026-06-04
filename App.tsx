@@ -67,26 +67,24 @@ function safeText(value: any, fallback = ''): string {
   return String(value);
 }
 
-async function fetchAllSessions(rest: HermesRestClient, archived: 'exclude' | 'include' | 'only' = 'exclude'): Promise<SessionSummary[]> {
-  const pageSize = 100;
-  const out: SessionSummary[] = [];
-  let offset = 0;
-  for (let page = 0; page < 200; page += 1) {
-    const data = await rest.sessions(pageSize, offset, archived);
-    const batch = Array.isArray(data) ? data : data.sessions || [];
-    out.push(...batch);
-    const total = Array.isArray(data) ? undefined : data.total;
-    if (!batch.length || batch.length < pageSize) break;
-    offset += batch.length;
-    if (typeof total === 'number' && out.length >= total) break;
-  }
-  const seen = new Set<string>();
-  return out.filter(s => {
+const SESSION_PAGE_SIZE = 50;
+const ARTIFACT_SESSION_PAGE_SIZE = 20;
+
+function isNearScrollEnd(event: any): boolean {
+  const { layoutMeasurement, contentOffset, contentSize } = event.nativeEvent;
+  return layoutMeasurement.height + contentOffset.y >= contentSize.height - 160;
+}
+
+function appendUniqueSessions(existing: SessionSummary[], incoming: SessionSummary[]): SessionSummary[] {
+  const seen = new Set(existing.map(sessionId).filter(Boolean));
+  const next = [...existing];
+  for (const s of incoming) {
     const id = sessionId(s);
-    if (!id || seen.has(id)) return false;
+    if (!id || seen.has(id)) continue;
     seen.add(id);
-    return true;
-  });
+    next.push(s);
+  }
+  return next;
 }
 
 function compactJson(value: any, max = 140): string {
@@ -366,6 +364,9 @@ function ChatScreen({ rest, rpc, connected, activeSession, setActiveSession, act
   const [prompt, setPrompt] = useState('');
   const [busy, setBusy] = useState(false);
   const [loadingSessions, setLoadingSessions] = useState(false);
+  const [loadingMoreSessions, setLoadingMoreSessions] = useState(false);
+  const [sessionOffset, setSessionOffset] = useState(0);
+  const [sessionsHasMore, setSessionsHasMore] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [err, setErr] = useState('');
   const visibleMessages = messages.filter(isVisibleMessage);
@@ -393,14 +394,24 @@ function ChatScreen({ rest, rpc, connected, activeSession, setActiveSession, act
   const sortedSessions = useMemo(() => [...sessions].sort((a, b) => sessionTime(b) - sessionTime(a)), [sessions]);
   const drawerSessions = sortedSessions.filter(s => drawerMode === 'cron' ? isCronSession(s) : !isCronSession(s));
 
-  const refresh = async () => {
+  const loadSessions = async (reset = false) => {
     if (!rest) return;
-    setLoadingSessions(true);
+    const offset = reset ? 0 : sessionOffset;
+    if (!reset && (!sessionsHasMore || loadingSessions || loadingMoreSessions)) return;
+    reset ? setLoadingSessions(true) : setLoadingMoreSessions(true);
     try {
-      const data = await fetchAllSessions(rest, 'include');
-      setSessions(data);
-    } finally { setLoadingSessions(false); }
+      const data = await rest.sessions(SESSION_PAGE_SIZE, offset, 'include');
+      const batch = Array.isArray(data) ? data : data.sessions || [];
+      const total = Array.isArray(data) ? undefined : data.total;
+      setSessions(prev => reset ? batch : appendUniqueSessions(prev, batch));
+      const nextOffset = offset + batch.length;
+      setSessionOffset(nextOffset);
+      setSessionsHasMore(batch.length === SESSION_PAGE_SIZE && (typeof total !== 'number' || nextOffset < total));
+    } finally {
+      reset ? setLoadingSessions(false) : setLoadingMoreSessions(false);
+    }
   };
+  const refresh = async () => loadSessions(true);
   useEffect(() => { refresh().catch(e => setErr(e.message)); }, [rest]);
 
   const openSession = async (sid: string) => {
@@ -485,7 +496,7 @@ function ChatScreen({ rest, rpc, connected, activeSession, setActiveSession, act
           <Pressable onPress={() => setDrawerMode('chats')} style={[styles.drawerFilterPill, drawerMode === 'chats' && styles.drawerFilterPillActive]}><Text style={styles.drawerFilterText}>Chats</Text></Pressable>
           <Pressable onPress={() => setDrawerMode('cron')} style={[styles.drawerFilterPill, drawerMode === 'cron' && styles.drawerFilterPillActive]}><Text style={styles.drawerFilterText}>Cron</Text></Pressable>
         </View>
-        {loadingSessions ? <LoadingBlock label="Loading sessions…" compact /> : <ScrollView contentContainerStyle={{ gap: 8, paddingBottom: 26 }}>{drawerSessions.map(s => <Pressable key={sessionId(s)} style={[styles.drawerItem, activeSession === sessionId(s) && styles.selected]} onPress={() => openSession(sessionId(s))}><Text style={styles.listTitle} numberOfLines={1}>{titleOf(s)}</Text><Text style={styles.listSub}>{shortId(sessionId(s))} · {safeText(s.message_count ?? 0)} messages</Text></Pressable>)}</ScrollView>}
+        {loadingSessions ? <LoadingBlock label="Loading sessions…" compact /> : <ScrollView contentContainerStyle={{ gap: 8, paddingBottom: 26 }} onScroll={(event) => { if (isNearScrollEnd(event)) loadSessions(false).catch(e => setErr(e.message)); }} scrollEventThrottle={240}>{drawerSessions.map(s => <Pressable key={sessionId(s)} style={[styles.drawerItem, activeSession === sessionId(s) && styles.selected]} onPress={() => openSession(sessionId(s))}><Text style={styles.listTitle} numberOfLines={1}>{titleOf(s)}</Text><Text style={styles.listSub}>{shortId(sessionId(s))} · {safeText(s.message_count ?? 0)} messages</Text></Pressable>)}{loadingMoreSessions ? <LoadingBlock label="Loading more…" compact /> : sessionsHasMore ? <Text style={styles.mutedCenter}>Scroll for more</Text> : null}</ScrollView>}
       </View>
     </Modal>
   </View>;
@@ -542,13 +553,26 @@ function ApprovalsScreen({ rpc, events, activeSession }: any) {
 }
 
 function ArtifactsScreen({ rest }: { rest: HermesRestClient | null }) {
-  const [items, setItems] = useState<ArtifactItem[]>([]); const [err, setErr] = useState(''); const [loading, setLoading] = useState(false);
-  const load = async () => {
+  const [items, setItems] = useState<ArtifactItem[]>([]);
+  const [err, setErr] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [artifactOffset, setArtifactOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
+  const seenRef = useRef(new Set<string>());
+  const loadPage = async (reset = false) => {
     if (!rest) return;
-    setLoading(true);
+    const offset = reset ? 0 : artifactOffset;
+    if (!reset && (!hasMore || loading || loadingMore)) return;
+    reset ? setLoading(true) : setLoadingMore(true);
     try {
-      const sessions = await fetchAllSessions(rest, 'include');
-      const seen = new Set<string>();
+      if (reset) {
+        seenRef.current = new Set<string>();
+        setItems([]);
+      }
+      const data = await rest.sessions(ARTIFACT_SESSION_PAGE_SIZE, offset, 'include');
+      const sessions = Array.isArray(data) ? data : data.sessions || [];
+      const total = Array.isArray(data) ? undefined : data.total;
       const out: ArtifactItem[] = [];
       for (const s of sessions) {
         try {
@@ -557,18 +581,23 @@ function ArtifactsScreen({ rest }: { rest: HermesRestClient | null }) {
           for (const msg of messages) {
             for (const item of extractArtifactItems(msg, titleOf(s))) {
               const key = `${item.kind}:${item.value}`;
-              if (seen.has(key)) continue;
-              seen.add(key);
+              if (seenRef.current.has(key)) continue;
+              seenRef.current.add(key);
               out.push(item);
             }
           }
         } catch {}
       }
-      setItems(out);
-    } finally { setLoading(false); }
+      setItems(prev => reset ? out : [...prev, ...out]);
+      const nextOffset = offset + sessions.length;
+      setArtifactOffset(nextOffset);
+      setHasMore(sessions.length === ARTIFACT_SESSION_PAGE_SIZE && (typeof total !== 'number' || nextOffset < total));
+    } finally {
+      reset ? setLoading(false) : setLoadingMore(false);
+    }
   };
-  useEffect(()=>{ load().catch(e=>setErr(e.message)); }, [rest]);
-  return <ScrollView contentContainerStyle={styles.screen}><Card><Text style={styles.sectionTitle}>Artifacts</Text>{err ? <Text style={styles.error}>{err}</Text> : null}</Card>{loading ? <LoadingBlock label="Loading artifacts…" /> : items.length ? items.map((it,i)=><ArtifactCard key={`${it.kind}-${it.value}-${i}`} item={it} />) : <Empty title="No artifacts found" body="Shared files, links, images, and MEDIA attachments will appear here." />}</ScrollView>;
+  useEffect(()=>{ loadPage(true).catch(e=>setErr(e.message)); }, [rest]);
+  return <ScrollView contentContainerStyle={styles.screen} onScroll={(event) => { if (isNearScrollEnd(event)) loadPage(false).catch(e=>setErr(e.message)); }} scrollEventThrottle={240}><Card><Text style={styles.sectionTitle}>Artifacts</Text>{err ? <Text style={styles.error}>{err}</Text> : null}</Card>{loading ? <LoadingBlock label="Loading artifacts…" /> : items.length ? items.map((it,i)=><ArtifactCard key={`${it.kind}-${it.value}-${i}`} item={it} />) : <Empty title="No artifacts found" body="Shared files, links, images, and MEDIA attachments will appear here." />}{loadingMore ? <LoadingBlock label="Loading more…" /> : hasMore && items.length ? <Text style={styles.mutedCenter}>Scroll for more</Text> : null}</ScrollView>;
 }
 
 const MARKDOWN_IMAGE_RE = /!\[([^\]]*)\]\(([^)\s]+)\)/g;
