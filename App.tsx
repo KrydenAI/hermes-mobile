@@ -15,9 +15,10 @@ type Tab = 'home' | 'chat' | 'approvals' | 'artifacts' | 'ops' | 'settings';
 type OpsScreen = 'hub' | 'skills' | 'mcp' | 'cron';
 type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
 type ToolStatus = 'running' | 'done' | 'error';
+type NonTextPart = { kind: 'tool' | 'skill' | 'thought'; name: string; status: ToolStatus; summary: string; detail?: string };
 type MessagePart =
   | { kind: 'text'; text: string }
-  | { kind: 'tool' | 'skill'; name: string; status: ToolStatus; summary: string; detail?: string };
+  | NonTextPart;
 type Message = { id: string; role: MessageRole; text: string; at: number; parts?: MessagePart[] };
 type ArtifactKind = 'image' | 'file' | 'link';
 type ArtifactItem = { session: string; kind: ArtifactKind; label: string; value: string; href: string; canOpen: boolean };
@@ -148,6 +149,17 @@ function normalizeMessages(data: any): Message[] {
   return rows.map((m: any, i: number) => messageFromRaw(m, i)).filter(isVisibleMessage);
 }
 
+function nonTextParts(message: Message): NonTextPart[] {
+  const parts = message.parts?.length ? message.parts : parseMessageParts(message.text, message.role);
+  return parts.filter(p => p.kind !== 'text') as NonTextPart[];
+}
+
+function isToolOnlyMessage(message: Message): boolean {
+  const parts = message.parts?.length ? message.parts : parseMessageParts(message.text, message.role);
+  const text = parts.filter(p => p.kind === 'text').map(p => (p as any).text).join('').trim();
+  return !!parts.length && !text && parts.some(p => p.kind !== 'text');
+}
+
 export default function App() {
   const [profiles, setProfiles] = useState<ConnectionProfile[]>([]);
   const [profile, setProfile] = useState<ConnectionProfile | null>(null);
@@ -206,8 +218,12 @@ export default function App() {
           const text = safeText(event.payload?.text);
           if (/tool|skill/i.test(kind) && text) {
             const name = text.split(/\s+/)[0] || kind;
-            const part: Extract<MessagePart, { kind: 'tool' | 'skill' }> = { kind: toolKind(name), name, status: 'running', summary: text };
+            const part: NonTextPart = { kind: toolKind(name), name, status: 'running', summary: text };
             const nextMessage: Message = { id: makeId(), role: 'tool', text: '', parts: [part], at: Date.now() };
+            setMessages(prev => [...prev, nextMessage].slice(-120));
+          } else if (text) {
+            const part: NonTextPart = { kind: 'thought', name: 'thought', status: 'running', summary: text };
+            const nextMessage: Message = { id: makeId(), role: 'system', text: '', parts: [part], at: Date.now() };
             setMessages(prev => [...prev, nextMessage].slice(-120));
           }
         }
@@ -318,6 +334,25 @@ function ChatScreen({ rest, rpc, connected, activeSession, setActiveSession, act
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [err, setErr] = useState('');
   const visibleMessages = messages.filter(isVisibleMessage);
+  const renderMessages = () => {
+    const nodes: React.ReactNode[] = [];
+    let pendingCalls: NonTextPart[] = [];
+    const flush = (key: string) => {
+      if (!pendingCalls.length) return;
+      nodes.push(<ActivitySummaryLine key={`calls-${key}`} parts={pendingCalls} />);
+      pendingCalls = [];
+    };
+    visibleMessages.forEach((message: Message, index: number) => {
+      if (isToolOnlyMessage(message)) {
+        pendingCalls.push(...nonTextParts(message));
+        return;
+      }
+      flush(message.id || String(index));
+      nodes.push(<MessageBubble key={message.id} message={message} />);
+    });
+    flush('tail');
+    return nodes;
+  };
   const storedIdFromRpc = (r: any) => safeText(r?.stored_session_id || r?.session_key || r?.resumed || r?.id || r?.session_id);
   const runtimeIdFromRpc = (r: any) => safeText(r?.session_id || r?.runtime_session_id || r?.id);
 
@@ -400,7 +435,7 @@ function ChatScreen({ rest, rpc, connected, activeSession, setActiveSession, act
     </View>
     {err ? <Text style={styles.errorInline}>{err}</Text> : null}
     <ScrollView contentContainerStyle={styles.chatMessages}>
-      {loadingMessages ? <LoadingBlock label="Loading chat…" /> : visibleMessages.length ? visibleMessages.map((m: Message) => <MessageBubble key={m.id} message={m} />) : <View style={styles.centerPane}><Ionicons name="sparkles-outline" size={32} color={colors.primary2} /><Text style={styles.sectionTitle}>How can Hermes help?</Text><Text style={styles.mutedCenter}>Start typing, or open the menu to choose a previous session.</Text></View>}
+      {loadingMessages ? <LoadingBlock label="Loading chat…" /> : visibleMessages.length ? renderMessages() : <View style={styles.centerPane}><Ionicons name="sparkles-outline" size={32} color={colors.primary2} /><Text style={styles.sectionTitle}>How can Hermes help?</Text><Text style={styles.mutedCenter}>Start typing, or open the menu to choose a previous session.</Text></View>}
       {busy ? <ToolCallCard part={{ kind: 'tool', name: 'Hermes', status: 'running', summary: 'Thinking' }} /> : null}
     </ScrollView>
     <View style={styles.composer}><TextInput value={prompt} onChangeText={setPrompt} placeholder="Message Hermes…" placeholderTextColor={colors.faint} style={styles.composerInput} multiline /><Pressable onPress={submit} disabled={busy || !connected} style={[styles.send, (!connected || busy) && { opacity: 0.45 }]}><Ionicons name="send" color={colors.text} size={20}/></Pressable></View>
@@ -419,18 +454,33 @@ function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === 'user';
   const parts = message.parts?.length ? message.parts : parseMessageParts(message.text, message.role);
   const textParts = parts.filter(p => p.kind === 'text') as Extract<MessagePart, { kind: 'text' }>[];
-  const toolParts = parts.filter(p => p.kind !== 'text') as Extract<MessagePart, { kind: 'tool' | 'skill' }>[];
+  const toolParts = parts.filter(p => p.kind !== 'text') as NonTextPart[];
+  if (!textParts.length && toolParts.length) return <ActivitySummaryLine parts={toolParts} />;
   return <View style={[styles.messageWrap, isUser && styles.messageWrapUser]}>
+    {toolParts.length ? <ActivitySummaryLine parts={toolParts} /> : null}
     <View style={[styles.bubble, isUser ? styles.userBubble : styles.assistantBubble]}>
       {!isUser ? <Text style={styles.bubbleRole}>{message.role}</Text> : null}
       {textParts.map((p, i) => <Text key={`t-${i}`} style={styles.text}>{p.text}</Text>)}
       {!textParts.length && !toolParts.length ? <Text style={styles.muted}>No visible content.</Text> : null}
     </View>
-    {toolParts.map((part, i) => <ToolCallCard key={`${part.name}-${i}`} part={part} />)}
   </View>;
 }
 
-function ToolCallCard({ part }: { part: Extract<MessagePart, { kind: 'tool' | 'skill' }> }) {
+function ActivitySummaryLine({ parts }: { parts: NonTextPart[] }) {
+  const tools = parts.filter(p => p.kind === 'tool').length;
+  const skills = parts.filter(p => p.kind === 'skill').length;
+  const thoughts = parts.filter(p => p.kind === 'thought').length;
+  const errors = parts.filter(p => p.status === 'error').length;
+  const names = Array.from(new Set(parts.filter(p => p.kind !== 'thought').map(p => toolTitle(p.name)).filter(Boolean))).slice(0, 3).join(', ');
+  const bits = tools || skills ? [`${tools + skills} call${tools + skills === 1 ? '' : 's'} made`] : [];
+  if (skills) bits.push(`${skills} skill${skills === 1 ? '' : 's'}`);
+  if (tools) bits.push(`${tools} tool${tools === 1 ? '' : 's'}`);
+  if (thoughts) bits.push(`${thoughts} thought update${thoughts === 1 ? '' : 's'}`);
+  if (errors) bits.push(`${errors} error${errors === 1 ? '' : 's'}`);
+  return <Text style={styles.activityLine}>{bits.join(' · ')}{names ? ` · ${names}` : ''}</Text>;
+}
+
+function ToolCallCard({ part }: { part: NonTextPart }) {
   const isSkill = part.kind === 'skill';
   const color = part.status === 'error' ? colors.bad : isSkill ? colors.primary2 : colors.primary;
   const icon: keyof typeof Ionicons.glyphMap = isSkill ? 'library-outline' : part.status === 'error' ? 'warning-outline' : 'terminal-outline';
@@ -641,7 +691,7 @@ const styles = StyleSheet.create({
   composer:{flexDirection:'row',alignItems:'flex-end',gap:10,padding:12,borderTopWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(5,7,13,0.96)'}, composerInput:{flex:1,maxHeight:130,backgroundColor:'rgba(255,255,255,0.06)',borderWidth:1,borderColor:colors.stroke,borderRadius:22,paddingHorizontal:15,paddingVertical:11,color:colors.text}, send:{backgroundColor:colors.primary,borderRadius:99,width:46,height:46,alignItems:'center',justifyContent:'center'},
   messageWrap:{alignSelf:'stretch',gap:6,marginBottom:8}, messageWrapUser:{alignItems:'flex-end'}, bubble:{borderRadius:radius.lg,padding:13,gap:5}, userBubble:{backgroundColor:'rgba(139,92,246,0.25)',alignSelf:'flex-end',maxWidth:'92%'}, assistantBubble:{backgroundColor:'rgba(255,255,255,0.06)',alignSelf:'flex-start',maxWidth:'96%'}, bubbleRole:{color:colors.primary2,fontSize:11,fontWeight:'900',textTransform:'uppercase'},
   drawerScrim:{...StyleSheet.absoluteFillObject,backgroundColor:'rgba(0,0,0,0.52)'}, drawer:{position:'absolute',left:0,top:0,bottom:0,width:'82%',maxWidth:360,backgroundColor:'#080c18',borderRightWidth:1,borderColor:colors.stroke,paddingTop:58,paddingHorizontal:14,gap:12}, drawerItem:{borderWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(255,255,255,0.04)',borderRadius:radius.md,padding:13},
-  toolCard:{alignSelf:'flex-start',maxWidth:'96%',borderWidth:1,borderColor:'rgba(139,92,246,0.28)',backgroundColor:'rgba(139,92,246,0.09)',borderRadius:radius.md,padding:10,flexDirection:'row',gap:10,alignItems:'flex-start'}, skillCard:{borderColor:'rgba(34,211,238,0.28)',backgroundColor:'rgba(34,211,238,0.08)'}, toolCardError:{borderColor:'rgba(251,113,133,0.35)',backgroundColor:'rgba(251,113,133,0.08)'}, toolGlyph:{width:25,height:25,borderRadius:99,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(0,0,0,0.2)'}, toolTitle:{color:colors.text,fontSize:13,fontWeight:'900'}, toolSub:{color:colors.muted,fontSize:12,lineHeight:17,marginTop:2}, toolDetail:{color:colors.bad,fontSize:12,lineHeight:17,marginTop:6,fontFamily:Platform.select({ios:'Menlo',android:'monospace',default:'monospace'})},
+  toolCard:{alignSelf:'flex-start',maxWidth:'96%',borderWidth:1,borderColor:'rgba(139,92,246,0.28)',backgroundColor:'rgba(139,92,246,0.09)',borderRadius:radius.md,padding:10,flexDirection:'row',gap:10,alignItems:'flex-start'}, skillCard:{borderColor:'rgba(34,211,238,0.28)',backgroundColor:'rgba(34,211,238,0.08)'}, toolCardError:{borderColor:'rgba(251,113,133,0.35)',backgroundColor:'rgba(251,113,133,0.08)'}, toolGlyph:{width:25,height:25,borderRadius:99,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(0,0,0,0.2)'}, toolTitle:{color:colors.text,fontSize:13,fontWeight:'900'}, toolSub:{color:colors.muted,fontSize:12,lineHeight:17,marginTop:2}, toolDetail:{color:colors.bad,fontSize:12,lineHeight:17,marginTop:6,fontFamily:Platform.select({ios:'Menlo',android:'monospace',default:'monospace'})}, activityLine:{alignSelf:'flex-start',color:colors.muted,fontSize:12,fontWeight:'700',paddingHorizontal:3,paddingVertical:2},
   headerCompact:{paddingHorizontal:16,paddingTop:8,paddingBottom:10,flexDirection:'row',alignItems:'center',justifyContent:'space-between',borderBottomWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(5,7,13,0.48)'}, rowCenter:{flexDirection:'row',alignItems:'center',gap:10,flex:1}, headerBack:{width:34,height:34,borderRadius:99,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(255,255,255,0.06)',borderWidth:1,borderColor:colors.stroke}, headerTitle:{color:colors.text,fontSize:20,fontWeight:'900',letterSpacing:-0.3}, headerSub:{color:colors.muted,fontSize:12,marginTop:2},
   onboardingScreen:{padding:16,paddingBottom:36,gap:14}, hero:{alignItems:'center',gap:10,paddingTop:22,paddingBottom:8,paddingHorizontal:8}, heroTitle:{color:colors.text,fontSize:42,fontWeight:'900',letterSpacing:-1.4,textAlign:'center'}, orbital:{width:148,height:132,alignItems:'center',justifyContent:'center',marginVertical:8}, orbitalRing:{position:'absolute',width:142,height:76,borderRadius:999,borderWidth:1,borderColor:'rgba(139,92,246,0.52)',transform:[{rotate:'-18deg'}]}, orbitalRingTilt:{borderColor:'rgba(34,211,238,0.34)',transform:[{rotate:'24deg'}]}, orbitalCore:{width:70,height:70,borderRadius:35,alignItems:'center',justifyContent:'center',shadowColor:colors.primary,shadowOpacity:0.55,shadowRadius:18}, advancedLink:{alignSelf:'center',flexDirection:'row',alignItems:'center',gap:5,paddingVertical:4}, advancedText:{color:colors.primary2,fontWeight:'800'}, advancedPanel:{gap:10,borderTopWidth:1,borderColor:colors.stroke,paddingTop:10}, compactIcon:{width:34,height:34,borderRadius:99,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(255,255,255,0.05)',borderWidth:1,borderColor:colors.stroke},
   opsRow:{borderWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(17,24,47,0.82)',borderRadius:radius.lg,padding:15,flexDirection:'row',alignItems:'center',gap:12,...shadow}, opsIcon:{width:42,height:42,borderRadius:14,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(139,92,246,0.14)',borderWidth:1,borderColor:'rgba(139,92,246,0.26)'}, compactListItem:{borderWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(255,255,255,0.035)',borderRadius:radius.md,overflow:'hidden'}, compactMain:{padding:12,flexDirection:'row',alignItems:'center',justifyContent:'space-between',gap:10}, statusDot:{width:9,height:9,borderRadius:99,backgroundColor:colors.good}, statusDotOff:{backgroundColor:colors.muted}, detailsPanel:{borderTopWidth:1,borderColor:colors.stroke,padding:12,gap:10,backgroundColor:'rgba(0,0,0,0.16)'}
