@@ -11,7 +11,8 @@ import { deleteProfile, loadProfiles, upsertProfile } from './src/storage';
 import { colors, radius, shadow } from './src/theme';
 import type { ConnectionProfile, CronJob, HermesEvent, McpCatalogEntry, McpServer, SessionSummary, SkillInfo, ToolsetInfo } from './src/types';
 
-type Tab = 'home' | 'chat' | 'approvals' | 'artifacts' | 'skills' | 'mcp' | 'cron' | 'settings';
+type Tab = 'home' | 'chat' | 'approvals' | 'artifacts' | 'ops' | 'settings';
+type OpsScreen = 'hub' | 'skills' | 'mcp' | 'cron';
 type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
 type ToolStatus = 'running' | 'done' | 'error';
 type MessagePart =
@@ -22,14 +23,11 @@ type ArtifactKind = 'image' | 'file' | 'link';
 type ArtifactItem = { session: string; kind: ArtifactKind; label: string; value: string; href: string; canOpen: boolean };
 type Status = 'idle' | 'testing' | 'connected' | 'error';
 
-const tabs: { id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
-  { id: 'home', label: 'Connect', icon: 'radio-outline' },
+const tabs: { id: Exclude<Tab, 'home'>; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
   { id: 'chat', label: 'Chat', icon: 'chatbubble-ellipses-outline' },
   { id: 'approvals', label: 'Needs Me', icon: 'hand-left-outline' },
   { id: 'artifacts', label: 'Artifacts', icon: 'sparkles-outline' },
-  { id: 'skills', label: 'Skills', icon: 'library-outline' },
-  { id: 'mcp', label: 'MCP', icon: 'git-network-outline' },
-  { id: 'cron', label: 'Cron', icon: 'alarm-outline' },
+  { id: 'ops', label: 'Ops', icon: 'grid-outline' },
   { id: 'settings', label: 'Settings', icon: 'settings-outline' }
 ];
 
@@ -154,6 +152,7 @@ export default function App() {
   const [profiles, setProfiles] = useState<ConnectionProfile[]>([]);
   const [profile, setProfile] = useState<ConnectionProfile | null>(null);
   const [tab, setTab] = useState<Tab>('home');
+  const [opsScreen, setOpsScreen] = useState<OpsScreen>('hub');
   const [status, setStatus] = useState<Status>('idle');
   const [statusPayload, setStatusPayload] = useState<any>(null);
   const [error, setError] = useState('');
@@ -219,6 +218,7 @@ export default function App() {
       const updated = { ...runtimeProfile, wsTicket: undefined, lastUsedAt: Date.now() };
       setProfile(updated);
       setProfiles(await upsertProfile(updated));
+      setTab('chat');
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => undefined);
     } catch (e: any) {
       setStatus('error'); setError(e?.message || String(e));
@@ -228,44 +228,50 @@ export default function App() {
 
   return (
     <SafeAreaProvider>
-      <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
+      <SafeAreaView style={styles.safe} edges={['top', 'bottom', 'left', 'right']}>
         <LinearGradient colors={[colors.bg, '#070b18', colors.bg]} style={StyleSheet.absoluteFill} />
         <View style={styles.root}>
-          <Header profile={profile} status={status} />
+          {tab !== 'home' ? <Header profile={profile} status={status} active={tab} opsScreen={opsScreen} onStatusPress={() => setTab('settings')} onBack={tab === 'ops' && opsScreen !== 'hub' ? () => setOpsScreen('hub') : undefined} /> : null}
           <View style={styles.body}>
             {tab === 'home' && <ConnectScreen profiles={profiles} active={profile} status={status} error={error} statusPayload={statusPayload} onSelect={setProfile} onSave={async (p: ConnectionProfile) => { setProfile(p); setProfiles(await upsertProfile(p)); await connect(p); }} onDelete={async (id: string) => { setProfiles(await deleteProfile(id)); if (profile?.id === id) setProfile(null); }} />}
             {tab === 'chat' && <ChatScreen rest={rest} rpc={rpcRef.current} connected={status === 'connected'} activeSession={activeSession} setActiveSession={setActiveSession} activeRuntimeSession={activeRuntimeSession} setActiveRuntimeSession={setActiveRuntimeSession} messages={messages} setMessages={setMessages} />}
             {tab === 'approvals' && <ApprovalsScreen rpc={rpcRef.current} events={events} activeSession={activeSession} />}
             {tab === 'artifacts' && <ArtifactsScreen rest={rest} />}
-            {tab === 'skills' && <SkillsScreen rest={rest} />}
-            {tab === 'mcp' && <McpScreen rest={rest} />}
-            {tab === 'cron' && <CronScreen rest={rest} />}
+            {tab === 'ops' && opsScreen === 'hub' && <OpsHubScreen setOpsScreen={setOpsScreen} />}
+            {tab === 'ops' && opsScreen === 'skills' && <SkillsScreen rest={rest} />}
+            {tab === 'ops' && opsScreen === 'mcp' && <McpScreen rest={rest} />}
+            {tab === 'ops' && opsScreen === 'cron' && <CronScreen rest={rest} />}
             {tab === 'settings' && <SettingsScreen rest={rest} profile={profile} statusPayload={statusPayload} />}
           </View>
-          <TabBar active={tab} setActive={setTab} />
+          {status === 'connected' ? <TabBar active={tab === 'home' ? 'chat' : tab} setActive={(next) => { setTab(next); if (next !== 'ops') setOpsScreen('hub'); }} /> : null}
         </View>
       </SafeAreaView>
     </SafeAreaProvider>
   );
 }
 
-function Header({ profile, status }: { profile: ConnectionProfile | null; status: Status }) {
-  return <View style={styles.header}>
-    <View><Text style={styles.eyebrow}>Hermes Mobile</Text><Text style={styles.title}>Pocket cockpit</Text></View>
-    <View style={[styles.pill, status === 'connected' ? styles.pillGood : status === 'error' ? styles.pillBad : null]}>
-      <View style={[styles.dot, status === 'connected' ? { backgroundColor: colors.good } : status === 'error' ? { backgroundColor: colors.bad } : { backgroundColor: colors.warn }]} />
-      <Text style={styles.pillText}>{profile ? profile.name : 'No backend'}</Text>
+function Header({ profile, status, active, opsScreen, onStatusPress, onBack }: { profile: ConnectionProfile | null; status: Status; active: Tab; opsScreen: OpsScreen; onStatusPress: () => void; onBack?: () => void }) {
+  const title = active === 'approvals' ? 'Needs Me' : active === 'ops' ? (opsScreen === 'hub' ? 'Ops' : opsScreen === 'mcp' ? 'MCP Servers' : opsScreen === 'cron' ? 'Cron' : 'Skills') : active === 'artifacts' ? 'Artifacts' : active === 'settings' ? 'Settings' : 'Hermes';
+  const subtitle = active === 'ops' && opsScreen === 'hub' ? 'Operate and extend Hermes.' : active === 'settings' ? 'Connection, profiles, auth, system.' : undefined;
+  return <View style={styles.headerCompact}>
+    <View style={styles.rowCenter}>
+      {onBack ? <Pressable onPress={onBack} style={styles.headerBack}><Ionicons name="chevron-back" size={22} color={colors.text} /></Pressable> : null}
+      <View><Text style={styles.headerTitle}>{title}</Text>{subtitle ? <Text style={styles.headerSub}>{subtitle}</Text> : null}</View>
     </View>
+    <Pressable onPress={onStatusPress} style={[styles.pill, status === 'connected' ? styles.pillGood : status === 'error' ? styles.pillBad : null]}>
+      <View style={[styles.dot, status === 'connected' ? { backgroundColor: colors.good } : status === 'error' ? { backgroundColor: colors.bad } : { backgroundColor: colors.warn }]} />
+      <Text style={styles.pillText}>{profile ? 'Hermes' : 'Connect'}</Text>
+    </Pressable>
   </View>;
 }
 
-function TabBar({ active, setActive }: { active: Tab; setActive: (t: Tab) => void }) {
-  return <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabs} contentContainerStyle={styles.tabsInner}>
+function TabBar({ active, setActive }: { active: Exclude<Tab, 'home'>; setActive: (t: Exclude<Tab, 'home'>) => void }) {
+  return <View style={styles.tabs}>
     {tabs.map(t => <Pressable key={t.id} onPress={() => setActive(t.id)} style={[styles.tab, active === t.id && styles.tabActive]}>
-      <Ionicons name={t.icon} size={19} color={active === t.id ? colors.text : colors.muted} />
-      <Text style={[styles.tabText, active === t.id && { color: colors.text }]}>{t.label}</Text>
+      <Ionicons name={t.icon} size={20} color={active === t.id ? colors.text : colors.muted} />
+      <Text style={[styles.tabText, active === t.id && { color: colors.text }]} numberOfLines={1}>{t.label}</Text>
     </Pressable>)}
-  </ScrollView>;
+  </View>;
 }
 
 function ConnectScreen({ profiles, active, status, error, statusPayload, onSelect, onSave, onDelete }: any) {
@@ -274,34 +280,32 @@ function ConnectScreen({ profiles, active, status, error, statusPayload, onSelec
   const [token, setToken] = useState(active?.token || '');
   const [username, setUsername] = useState(active?.username || '');
   const [password, setPassword] = useState(active?.password || '');
-  const setupCommand = 'hermes dashboard --tui --no-open --host <tailscale-or-lan-ip> --port 9119 --insecure';
+  const [advanced, setAdvanced] = useState(false);
   useEffect(() => { if (active) { setName(active.name); setBaseUrl(active.baseUrl); setToken(active.token || ''); setUsername(active.username || ''); setPassword(active.password || ''); } }, [active]);
-
   const save = () => onSave({ id: active?.id || makeId(), name: name.trim() || 'Hermes', baseUrl: normalizeBaseUrl(baseUrl), token: token.trim(), username: username.trim(), password, authMode: username.trim() || password ? 'password' : 'auto', createdAt: active?.createdAt || Date.now(), lastUsedAt: Date.now() });
 
-  return <ScrollView contentContainerStyle={styles.screen}>
+  return <ScrollView contentContainerStyle={styles.onboardingScreen}>
+    <View style={styles.hero}>
+      <Text style={styles.eyebrow}>Hermes Mobile</Text>
+      <Text style={styles.heroTitle}>Pocket cockpit</Text>
+      <View style={styles.orbital}><View style={styles.orbitalRing} /><View style={[styles.orbitalRing, styles.orbitalRingTilt]} /><LinearGradient colors={[colors.primary2, colors.primary]} style={styles.orbitalCore}><Ionicons name="sparkles" size={30} color={colors.text} /></LinearGradient></View>
+      <Text style={styles.sectionTitle}>Connect to your Hermes dashboard</Text>
+      <Text style={styles.mutedCenter}>Paste your dashboard URL. Token discovery is automatic for Tailnet/LAN mode.</Text>
+    </View>
     <Card>
-      <Text style={styles.sectionTitle}>Quick Connect</Text>
-      <Text style={styles.muted}>Paste your dashboard URL. Token discovery is automatic for Tailnet/LAN mode.</Text>
-    </Card>
-    <Card>
-      <Text style={styles.sectionTitle}>Connect to Hermes</Text>
-      <Label text="Profile name" /><Input value={name} onChangeText={setName} placeholder="My Hermes" />
-      <Label text="Dashboard URL" /><Input value={baseUrl} onChangeText={setBaseUrl} autoCapitalize="none" placeholder="http://desktop.tailnet.ts.net:9119" />
-      <View style={styles.row}><Button icon="flash-outline" text={status === 'testing' ? 'Connecting...' : 'Save + Connect'} onPress={save} /></View>
+      <Label text="Dashboard URL" /><Input value={baseUrl} onChangeText={setBaseUrl} autoCapitalize="none" placeholder="http://100.74.248.8:9119" />
+      <Button icon="flash-outline" text={status === 'testing' ? 'Connecting...' : 'Connect'} onPress={save} />
       {error ? <Text style={styles.error}>{error}</Text> : null}
-      {statusPayload ? <Text style={styles.success}>REST OK · {safeText(statusPayload.version || statusPayload.hermes_version || 'Hermes')} · {safeText(statusPayload.mobile_message || 'connected')}</Text> : null}
-      <Label text="Session token (optional)" /><Input value={token} onChangeText={setToken} autoCapitalize="none" secureTextEntry placeholder="Usually auto-discovered" />
-      <Label text="Internal login username (optional)" /><Input value={username} onChangeText={setUsername} autoCapitalize="none" placeholder="Only if dashboard advertises password login" />
-      <Label text="Internal login password (optional)" /><Input value={password} onChangeText={setPassword} secureTextEntry placeholder="Only if dashboard advertises password login" />
+      {statusPayload ? <Text style={styles.success}>REST OK · {safeText(statusPayload.version || statusPayload.hermes_version || 'Hermes')}</Text> : null}
+      <Pressable onPress={() => setAdvanced(v => !v)} style={styles.advancedLink}><Text style={styles.advancedText}>Advanced options</Text><Ionicons name={advanced ? 'chevron-up' : 'chevron-down'} size={16} color={colors.primary2} /></Pressable>
+      {advanced ? <View style={styles.advancedPanel}>
+        <Label text="Profile name" /><Input value={name} onChangeText={setName} placeholder="My Hermes" />
+        <Label text="Session token (optional)" /><Input value={token} onChangeText={setToken} autoCapitalize="none" secureTextEntry placeholder="Usually auto-discovered" />
+        <Label text="Internal login username (optional)" /><Input value={username} onChangeText={setUsername} autoCapitalize="none" placeholder="Only if dashboard advertises password login" />
+        <Label text="Internal login password (optional)" /><Input value={password} onChangeText={setPassword} secureTextEntry placeholder="Only if dashboard advertises password login" />
+      </View> : null}
     </Card>
-    <Card>
-      <Text style={styles.sectionTitle}>Recommended backend</Text>
-      <Text style={styles.muted}>Run this on your Hermes computer, then paste the URL above.</Text>
-      <Command text={setupCommand} />
-      <View style={styles.row}><Button text="Open Tailscale" icon="open-outline" secondary onPress={() => Linking.openURL('https://tailscale.com/download')} /><Button text="Copy command" icon="copy-outline" secondary onPress={() => Clipboard.setStringAsync(setupCommand)} /></View>
-    </Card>
-    {profiles.length ? <Card><Text style={styles.sectionTitle}>Saved backends</Text>{profiles.map((p: ConnectionProfile) => <Pressable key={p.id} style={styles.listItem} onPress={() => onSelect(p)}><View style={{ flex: 1 }}><Text style={styles.listTitle}>{p.name}</Text><Text style={styles.listSub}>{p.baseUrl} · {p.authMode || 'auto'}</Text></View><Pressable onPress={() => onDelete(p.id)}><Ionicons name="trash-outline" size={18} color={colors.bad} /></Pressable></Pressable>)}</Card> : null}
+    {profiles.length ? <Card><Text style={styles.sectionTitle}>Saved backends</Text>{profiles.map((p: ConnectionProfile) => <Pressable key={p.id} style={styles.listItem} onPress={() => onSelect(p)}><View style={{ flex: 1 }}><Text style={styles.listTitle}>{p.name}</Text><Text style={styles.listSub} numberOfLines={1}>{p.baseUrl} · {p.authMode || 'auto'}</Text></View><Pressable onPress={() => onDelete(p.id)} style={styles.compactIcon}><Ionicons name="trash-outline" size={17} color={colors.bad} /></Pressable></Pressable>)}</Card> : null}
   </ScrollView>;
 }
 
@@ -538,6 +542,22 @@ function ArtifactCard({ item }: { item: ArtifactItem }) {
   return <Pressable onPress={open}><Card><View style={styles.rowBetween}><View style={{ flex: 1 }}><Text style={styles.eyebrow}>{item.kind}</Text><Text style={styles.listTitle} numberOfLines={1}>{item.label}</Text><Text style={styles.listSub} numberOfLines={1}>{item.session}</Text></View><Ionicons name={icon} size={24} color={colors.primary2} /></View><Text style={styles.muted} numberOfLines={2}>{item.value}</Text><View style={styles.row}><Button text={item.canOpen ? 'Open' : 'Copy path'} icon={item.canOpen ? 'open-outline' : 'copy-outline'} secondary onPress={open} /></View></Card></Pressable>;
 }
 
+function OpsHubScreen({ setOpsScreen }: { setOpsScreen: (screen: OpsScreen) => void }) {
+  const rows: { id: OpsScreen; title: string; sub: string; icon: keyof typeof Ionicons.glyphMap }[] = [
+    { id: 'skills', title: 'Skills', sub: 'Toolsets and reusable procedures', icon: 'library-outline' },
+    { id: 'mcp', title: 'MCP Servers', sub: 'External tools and integrations', icon: 'git-network-outline' },
+    { id: 'cron', title: 'Cron', sub: 'Scheduled autonomous jobs', icon: 'alarm-outline' }
+  ];
+  return <ScrollView contentContainerStyle={styles.screen}>
+    {rows.map(row => <Pressable key={row.id} onPress={() => setOpsScreen(row.id)} style={styles.opsRow}>
+      <View style={styles.opsIcon}><Ionicons name={row.icon} size={21} color={colors.primary2} /></View>
+      <View style={{ flex: 1 }}><Text style={styles.listTitle}>{row.title}</Text><Text style={styles.listSub}>{row.sub}</Text></View>
+      <Ionicons name="chevron-forward" size={20} color={colors.muted} />
+    </Pressable>)}
+    <Card><Text style={styles.sectionTitle}>Recent activity</Text><Text style={styles.muted}>Live activity will appear here as Hermes reports ops events.</Text></Card>
+  </ScrollView>;
+}
+
 function SkillsScreen({ rest }: { rest: HermesRestClient | null }) {
   const [skills,setSkills]=useState<SkillInfo[]>([]); const [tools,setTools]=useState<ToolsetInfo[]>([]); const [query,setQuery]=useState(''); const [err,setErr]=useState(''); const [loading,setLoading]=useState(false);
   const load=async()=>{ if(!rest)return; setLoading(true); try { const [s,t]=await Promise.all([rest.skills(), rest.toolsets()]); setSkills(Array.isArray(s)?s:[]); setTools(Array.isArray(t)?t:[]); } finally { setLoading(false); } };
@@ -559,16 +579,23 @@ function McpScreen({ rest }: { rest: HermesRestClient | null }) {
   const [args,setArgs]=useState('');
   const [env,setEnv]=useState('{}');
   const [auth,setAuth]=useState('');
+  const [expanded,setExpanded]=useState('');
   const normalizeServers=(raw:any):McpServer[]=>Array.isArray(raw)?raw:(Array.isArray(raw?.servers)?raw.servers:[]);
   const normalizeCatalog=(raw:any):McpCatalogEntry[]=>Array.isArray(raw)?raw:(Array.isArray(raw?.entries)?raw.entries:Array.isArray(raw?.servers)?raw.servers:Array.isArray(raw?.items)?raw.items:[]);
   const load=async()=>{ if(!rest)return; setLoading(true); setErr(''); try { const [s,c]=await Promise.all([rest.mcpServers(), rest.mcpCatalog().catch(()=>({ entries: [] })) as any]); setServers(normalizeServers(s)); setCatalog(normalizeCatalog(c)); } catch(e:any) { setErr(e.message); } finally { setLoading(false); } };
   useEffect(()=>{ load().catch(e=>setErr(e.message));},[rest]);
-  const create=async()=>{ if(!rest)return; setErr(''); setNotice(''); const serverName=name.trim(); if(!serverName){setErr('Server name is required.'); return;} let parsedEnv:Record<string,string>={}; try{ const raw=env.trim()?JSON.parse(env):{}; if(!raw||typeof raw!=='object'||Array.isArray(raw)) throw new Error('Env must be a JSON object'); parsedEnv=raw; } catch(e:any){ setErr(`Invalid env JSON: ${e.message}`); return; } const body:any={ name: serverName }; if(transport==='http') body.url=url.trim(); else { body.command=command.trim(); body.args=args.split(/\s+/).map(a=>a.trim()).filter(Boolean); } if(auth.trim()) body.auth=auth.trim(); if(Object.keys(parsedEnv).length) body.env=parsedEnv; try{ await rest.createMcpServer(body); setName(''); setUrl(''); setCommand(''); setArgs(''); setAuth(''); setEnv('{}'); setNotice(`Added MCP server ${serverName}. Reload MCP or start a fresh session for tools to appear.`); await load(); } catch(e:any){ setErr(e.message); } };
-  const remove=(serverName:string)=>Alert.alert('Remove MCP server?', serverName, [{ text:'Cancel', style:'cancel' }, { text:'Remove', style:'destructive', onPress:()=>void (async()=>{ try{ await rest?.deleteMcpServer(serverName); setNotice(`Removed MCP server ${serverName}.`); await load(); } catch(e:any){ setErr(e.message); } })() }]);
+  const create=async()=>{ if(!rest)return; setErr(''); setNotice(''); const serverName=name.trim(); if(!serverName){setErr('Server name is required.'); return;} let parsedEnv:Record<string,string>={}; try{ const raw=env.trim()?JSON.parse(env):{}; if(!raw||typeof raw!=='object'||Array.isArray(raw)) throw new Error('Env must be a JSON object'); parsedEnv=raw; } catch(e:any){ setErr(`Invalid env JSON: ${e.message}`); return; } const body:any={ name: serverName }; if(transport==='http') body.url=url.trim(); else { body.command=command.trim(); body.args=args.split(/\s+/).map(a=>a.trim()).filter(Boolean); } if(auth.trim()) body.auth=auth.trim(); if(Object.keys(parsedEnv).length) body.env=parsedEnv; try{ await rest.createMcpServer(body); setName(''); setUrl(''); setCommand(''); setArgs(''); setAuth(''); setEnv('{}'); setNotice(`Added ${serverName}. Reload MCP or start a fresh session for tools.`); await load(); } catch(e:any){ setErr(e.message); } };
+  const remove=(serverName:string)=>Alert.alert('Remove MCP server?', serverName, [{ text:'Cancel', style:'cancel' }, { text:'Remove', style:'destructive', onPress:()=>void (async()=>{ try{ await rest?.deleteMcpServer(serverName); setNotice(`Removed ${serverName}.`); await load(); } catch(e:any){ setErr(e.message); } })() }]);
   const test=async(serverName:string)=>{ try{ setErr(''); setNotice(`Testing ${serverName}…`); const result=await rest?.testMcpServer(serverName); const count=Array.isArray(result?.tools)?result.tools.length:0; setNotice(result?.ok ? `${serverName} connected · ${count} tools` : `${serverName} failed: ${safeText(result?.error||'unknown error')}`); } catch(e:any){ setErr(e.message); } };
-  const install=async(entry:McpCatalogEntry)=>{ try{ setErr(''); setNotice(`Installing ${entry.name}…`); await rest?.installMcp({ name: entry.name, enable: true }); setNotice(`Installed ${entry.name}. Provide any required env vars, then reload MCP/start a fresh session.`); await load(); } catch(e:any){ setErr(e.message); } };
-  const serverSub=(s:McpServer)=>`${safeText(s.transport || (s.url?'http':s.command?'stdio':'unknown'))}${s.url?` · ${s.url}`:s.command?` · ${s.command} ${(s.args||[]).join(' ')}`:''}${s.tools?` · ${Array.isArray(s.tools)?s.tools.length:'all'} tools`:''}`;
-  return <ScrollView contentContainerStyle={styles.screen}>{loading ? <LoadingBlock label="Loading MCP…" /> : <><Card><View style={styles.rowBetween}><Text style={styles.sectionTitle}>Servers</Text><Text style={styles.listSub}>{servers.length} configured</Text></View>{err?<Text style={styles.error}>{err}</Text>:null}{notice?<Text style={notice.includes('failed')?styles.error:styles.success}>{notice}</Text>:null}{servers.length===0?<Text style={styles.muted}>No configured MCP servers found.</Text>:servers.map(s=><View key={s.name} style={styles.listItem}><View style={{ flex: 1 }}><Text style={styles.listTitle}>{safeText(s.name)}</Text><Text style={styles.listSub}>{serverSub(s)}</Text>{s.env&&Object.keys(s.env).length?<Text style={styles.muted}>env: {Object.keys(s.env).join(', ')}</Text>:null}</View><View style={{ gap: 8, alignItems: 'flex-end' }}><Pressable style={[styles.toggle,s.enabled!==false&&styles.toggleOn]} onPress={async()=>{await rest?.setMcpEnabled(s.name,s.enabled===false); await load();}}><View style={[styles.knob,s.enabled!==false&&styles.knobOn]}/></Pressable><View style={styles.row}><Button text="Test" secondary icon="flash-outline" onPress={()=>void test(s.name)}/><Button text="Remove" secondary icon="trash-outline" onPress={()=>remove(s.name)}/></View></View></View>)}</Card><Card><Text style={styles.sectionTitle}>Add server</Text><Label text="Name"/><Input value={name} onChangeText={setName} placeholder="filesystem"/><View style={styles.row}><Button text="HTTP" secondary={transport!=='http'} icon="globe-outline" onPress={()=>setTransport('http')}/><Button text="Stdio" secondary={transport!=='stdio'} icon="terminal-outline" onPress={()=>setTransport('stdio')}/></View>{transport==='http'?<><Label text="URL"/><Input value={url} onChangeText={setUrl} placeholder="https://example.com/mcp" autoCapitalize="none"/></>:<><Label text="Command"/><Input value={command} onChangeText={setCommand} placeholder="npx" autoCapitalize="none"/><Label text="Args"/><Input value={args} onChangeText={setArgs} placeholder="-y @modelcontextprotocol/server-filesystem /path" autoCapitalize="none"/></>}<Label text="Env JSON"/><Input value={env} onChangeText={setEnv} multiline autoCapitalize="none"/><Label text="Auth"/><Input value={auth} onChangeText={setAuth} placeholder="oauth or header (optional)" autoCapitalize="none"/><Button text="Add MCP server" icon="add-outline" onPress={create}/></Card><Card><View style={styles.rowBetween}><View style={{ flex: 1 }}><Text style={styles.sectionTitle}>Optional MCP catalog</Text></View><Text style={styles.listSub}>{catalog.length} entries</Text></View>{catalog.length===0?<Text style={styles.muted}>No catalog entries returned by this dashboard.</Text>:catalog.slice(0,30).map((c,i)=><View key={c.name||i} style={styles.listItem}><View style={{ flex: 1 }}><Text style={styles.listTitle}>{safeText(c.name)}</Text><Text style={styles.listSub}>{safeText(c.transport||'mcp')} · {c.installed?'installed':'not installed'} · {c.enabled?'enabled':'disabled'}</Text><Text style={styles.muted}>{safeText(c.description||c.source||'')}</Text>{c.required_env?.length?<Text style={styles.muted}>requires: {c.required_env.map(e=>e.name).join(', ')}</Text>:null}</View><Button text={c.installed?'Installed':'Install'} secondary={c.installed} icon={c.installed?'checkmark-outline':'download-outline'} onPress={()=>!c.installed&&void install(c)}/></View>)}</Card></>}</ScrollView>;
+  const install=async(entry:McpCatalogEntry)=>{ try{ setErr(''); setNotice(`Installing ${entry.name}…`); await rest?.installMcp({ name: entry.name, enable: true }); setNotice(`Installed ${entry.name}. Add required env vars, then reload MCP/new turn.`); await load(); } catch(e:any){ setErr(e.message); } };
+  const serverSub=(s:McpServer)=>`${safeText(s.transport || (s.url?'http':s.command?'stdio':'unknown'))}${s.url?` · ${s.url}`:s.command?` · ${s.command}`:''}${s.tools?` · ${Array.isArray(s.tools)?s.tools.length:'all'} tools`:''}`;
+  return <ScrollView contentContainerStyle={styles.screen}>
+    {loading ? <LoadingBlock label="Loading MCP…" /> : <>
+      <Card><View style={styles.rowBetween}><Text style={styles.sectionTitle}>Servers</Text><Text style={styles.listSub}>{servers.length} configured</Text></View>{err?<Text style={styles.error}>{err}</Text>:null}{notice?<Text style={notice.includes('failed')?styles.error:styles.success}>{notice}</Text>:null}{servers.length===0?<Text style={styles.muted}>No configured MCP servers found.</Text>:servers.map(s=><View key={s.name} style={styles.compactListItem}><Pressable onPress={()=>setExpanded(expanded===s.name?'':s.name)} style={styles.compactMain}><View style={{ flex: 1 }}><Text style={styles.listTitle}>{safeText(s.name)}</Text><Text style={styles.listSub} numberOfLines={1}>{serverSub(s)}</Text></View><View style={[styles.statusDot, s.enabled===false && styles.statusDotOff]} /><Ionicons name="chevron-forward" size={18} color={colors.muted} /></Pressable>{expanded===s.name?<View style={styles.detailsPanel}>{s.env&&Object.keys(s.env).length?<Text style={styles.muted}>env: {Object.keys(s.env).join(', ')}</Text>:null}<View style={styles.row}><Button text="Test" secondary icon="flash-outline" onPress={()=>void test(s.name)}/><Button text={s.enabled===false?'Enable':'Disable'} secondary icon="power-outline" onPress={async()=>{await rest?.setMcpEnabled(s.name,s.enabled===false); await load();}}/><Button text="Remove" secondary icon="trash-outline" onPress={()=>remove(s.name)}/></View></View>:null}</View>)}</Card>
+      <Card><Text style={styles.sectionTitle}>Add server</Text><Label text="Name"/><Input value={name} onChangeText={setName} placeholder="filesystem"/><View style={styles.row}><Button text="HTTP" secondary={transport!=='http'} icon="globe-outline" onPress={()=>setTransport('http')}/><Button text="Stdio" secondary={transport!=='stdio'} icon="terminal-outline" onPress={()=>setTransport('stdio')}/></View>{transport==='http'?<><Label text="URL"/><Input value={url} onChangeText={setUrl} placeholder="https://example.com/mcp" autoCapitalize="none"/></>:<><Label text="Command"/><Input value={command} onChangeText={setCommand} placeholder="npx" autoCapitalize="none"/><Label text="Args"/><Input value={args} onChangeText={setArgs} placeholder="-y @modelcontextprotocol/server-filesystem" autoCapitalize="none"/></>}<Label text="Auth header/value (optional)"/><Input value={auth} onChangeText={setAuth} placeholder="Bearer ..." autoCapitalize="none" secureTextEntry/><Label text="Env JSON"/><Input value={env} onChangeText={setEnv} multiline/><Button text="Add server" icon="add-outline" onPress={create}/></Card>
+      <Card><View style={styles.rowBetween}><Text style={styles.sectionTitle}>Optional MCP catalog</Text><Text style={styles.listSub}>{catalog.length}</Text></View>{catalog.slice(0,12).map(entry=><View key={entry.name} style={styles.compactListItem}><View style={styles.compactMain}><View style={{ flex: 1 }}><Text style={styles.listTitle}>{safeText(entry.name)}</Text><Text style={styles.listSub} numberOfLines={2}>{safeText(entry.description||entry.transport||'Catalog entry')}</Text>{Array.isArray(entry.env)&&entry.env.length?<Text style={styles.muted}>env: {entry.env.join(', ')}</Text>:null}</View><Button text="Install" secondary icon="download-outline" onPress={()=>void install(entry)}/></View></View>)}</Card>
+    </>}
+  </ScrollView>;
 }
 
 function CronScreen({ rest }: { rest: HermesRestClient | null }) {
@@ -583,7 +610,7 @@ function SettingsScreen({ rest, profile, statusPayload }: { rest: HermesRestClie
   const [model,setModel]=useState<any>(null); const [profiles,setProfiles]=useState<any>(null); const [logs,setLogs]=useState<any>(null); const [loading,setLoading]=useState(false);
   const load=async()=>{ if(!rest)return; setLoading(true); try { const [m,p,l]=await Promise.all([rest.modelInfo().catch((e:any)=>({error:e.message})), rest.profiles().catch((e:any)=>({error:e.message})), rest.logs(40).catch((e:any)=>({error:e.message}))]); setModel(m); setProfiles(p); setLogs(l); } finally { setLoading(false); } };
   useEffect(()=>{load().catch(()=>undefined)},[rest]);
-  return <ScrollView contentContainerStyle={styles.screen}><Card><Text style={styles.sectionTitle}>Settings + system</Text></Card>{loading ? <LoadingBlock label="Loading system info…" /> : null}<JsonCard title="Connection" data={{ name: profile?.name, baseUrl: profile?.baseUrl, authMode: profile?.authMode || 'auto', token: profile?.token ? '[stored securely]' : null, username: profile?.username || null, password: profile?.password ? '[stored securely]' : null, platform: Platform.OS }} /><JsonCard title="Status" data={statusPayload}/><JsonCard title="Model" data={model}/><JsonCard title="Profiles" data={profiles}/><JsonCard title="Logs" data={logs}/></ScrollView>;
+  return <ScrollView contentContainerStyle={styles.screen}>{loading ? <LoadingBlock label="Loading system info…" /> : null}<JsonCard title="Connection details" data={{ name: profile?.name, baseUrl: profile?.baseUrl, platform: Platform.OS }} /><JsonCard title="Profiles" data={profiles}/><JsonCard title="Auth + session" data={{ authMode: profile?.authMode || 'auto', token: profile?.token ? '[stored securely]' : null, username: profile?.username || null, password: profile?.password ? '[stored securely]' : null }} /><JsonCard title="System status" data={statusPayload}/><JsonCard title="Raw JSON / status output" data={{ model, logs }}/><Card><Text style={styles.sectionTitle}>Advanced / admin</Text><Text style={styles.muted}>Dangerous actions stay behind explicit details/overflow controls.</Text></Card></ScrollView>;
 }
 
 function LoadingBlock({ label, compact }: { label: string; compact?: boolean }) { return <View style={[styles.loading, compact && { padding: 12 }]}><ActivityIndicator color={colors.primary2} /><Text style={styles.muted}>{label}</Text></View>; }
@@ -607,12 +634,15 @@ const styles = StyleSheet.create({
   row:{flexDirection:'row', gap:10, flexWrap:'wrap'}, rowBetween:{flexDirection:'row',justifyContent:'space-between',alignItems:'center',gap:12}, button:{backgroundColor:colors.primary, paddingHorizontal:14, paddingVertical:12, borderRadius:radius.md, flexDirection:'row',alignItems:'center',gap:7, justifyContent:'center'}, buttonSecondary:{backgroundColor:'rgba(255,255,255,0.08)', borderWidth:1,borderColor:colors.stroke}, buttonText:{color:colors.text,fontWeight:'800'},
   code:{fontFamily:Platform.select({ios:'Menlo',android:'monospace',default:'monospace'}), color:'#dbeafe', backgroundColor:'rgba(0,0,0,0.35)', borderRadius:radius.md, padding:12, overflow:'hidden', lineHeight:19},
   listItem:{borderWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(255,255,255,0.035)',borderRadius:radius.md,padding:13,flexDirection:'row',alignItems:'center',justifyContent:'space-between',gap:12}, selected:{borderColor:colors.primary2,backgroundColor:'rgba(34,211,238,0.08)'}, listTitle:{color:colors.text,fontSize:16,fontWeight:'800'}, listSub:{color:colors.muted,fontSize:12,marginTop:3},
-  tabs:{maxHeight:82,borderTopWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(5,7,13,0.92)'}, tabsInner:{padding:10,gap:8}, tab:{alignItems:'center',justifyContent:'center',gap:3,paddingHorizontal:12,paddingVertical:8,borderRadius:radius.md,borderWidth:1,borderColor:'transparent',minWidth:78}, tabActive:{backgroundColor:'rgba(139,92,246,0.22)',borderColor:'rgba(139,92,246,0.45)'}, tabText:{color:colors.muted,fontSize:11,fontWeight:'800'},
+  tabs:{height:78,borderTopWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(5,7,13,0.96)',flexDirection:'row',paddingHorizontal:8,paddingTop:8,paddingBottom:10,gap:4}, tabsInner:{padding:10,gap:8}, tab:{flex:1,alignItems:'center',justifyContent:'center',gap:3,paddingHorizontal:2,paddingVertical:7,borderRadius:radius.md,borderWidth:1,borderColor:'transparent'}, tabActive:{backgroundColor:'rgba(139,92,246,0.22)',borderColor:'rgba(139,92,246,0.45)'}, tabText:{color:colors.muted,fontSize:11,fontWeight:'800'},
   toggle:{width:48,height:28,borderRadius:999,backgroundColor:'rgba(255,255,255,0.14)',padding:3}, toggleOn:{backgroundColor:colors.primary}, knob:{width:22,height:22,borderRadius:99,backgroundColor:colors.text}, knobOn:{transform:[{translateX:20}]},
   loading:{borderWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(255,255,255,0.035)',borderRadius:radius.lg,padding:20,gap:10,alignItems:'center',justifyContent:'center'},
   chatRoot:{flex:1}, chatTopBar:{flexDirection:'row',alignItems:'center',gap:10,paddingHorizontal:12,paddingVertical:10,borderBottomWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(5,7,13,0.55)'}, iconButton:{width:42,height:42,borderRadius:99,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(255,255,255,0.06)',borderWidth:1,borderColor:colors.stroke}, chatTitle:{color:colors.text,fontSize:18,fontWeight:'900'}, chatSub:{color:colors.muted,fontSize:12,marginTop:2}, chatMessages:{padding:14,paddingBottom:28,gap:8,minHeight:'100%'}, centerPane:{flex:1,minHeight:420,alignItems:'center',justifyContent:'center',gap:10,paddingHorizontal:30},
   composer:{flexDirection:'row',alignItems:'flex-end',gap:10,padding:12,borderTopWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(5,7,13,0.96)'}, composerInput:{flex:1,maxHeight:130,backgroundColor:'rgba(255,255,255,0.06)',borderWidth:1,borderColor:colors.stroke,borderRadius:22,paddingHorizontal:15,paddingVertical:11,color:colors.text}, send:{backgroundColor:colors.primary,borderRadius:99,width:46,height:46,alignItems:'center',justifyContent:'center'},
   messageWrap:{alignSelf:'stretch',gap:6,marginBottom:8}, messageWrapUser:{alignItems:'flex-end'}, bubble:{borderRadius:radius.lg,padding:13,gap:5}, userBubble:{backgroundColor:'rgba(139,92,246,0.25)',alignSelf:'flex-end',maxWidth:'92%'}, assistantBubble:{backgroundColor:'rgba(255,255,255,0.06)',alignSelf:'flex-start',maxWidth:'96%'}, bubbleRole:{color:colors.primary2,fontSize:11,fontWeight:'900',textTransform:'uppercase'},
   drawerScrim:{...StyleSheet.absoluteFillObject,backgroundColor:'rgba(0,0,0,0.52)'}, drawer:{position:'absolute',left:0,top:0,bottom:0,width:'82%',maxWidth:360,backgroundColor:'#080c18',borderRightWidth:1,borderColor:colors.stroke,paddingTop:58,paddingHorizontal:14,gap:12}, drawerItem:{borderWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(255,255,255,0.04)',borderRadius:radius.md,padding:13},
-  toolCard:{alignSelf:'flex-start',maxWidth:'96%',borderWidth:1,borderColor:'rgba(139,92,246,0.28)',backgroundColor:'rgba(139,92,246,0.09)',borderRadius:radius.md,padding:10,flexDirection:'row',gap:10,alignItems:'flex-start'}, skillCard:{borderColor:'rgba(34,211,238,0.28)',backgroundColor:'rgba(34,211,238,0.08)'}, toolCardError:{borderColor:'rgba(251,113,133,0.35)',backgroundColor:'rgba(251,113,133,0.08)'}, toolGlyph:{width:25,height:25,borderRadius:99,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(0,0,0,0.2)'}, toolTitle:{color:colors.text,fontSize:13,fontWeight:'900'}, toolSub:{color:colors.muted,fontSize:12,lineHeight:17,marginTop:2}, toolDetail:{color:colors.bad,fontSize:12,lineHeight:17,marginTop:6,fontFamily:Platform.select({ios:'Menlo',android:'monospace',default:'monospace'})}
+  toolCard:{alignSelf:'flex-start',maxWidth:'96%',borderWidth:1,borderColor:'rgba(139,92,246,0.28)',backgroundColor:'rgba(139,92,246,0.09)',borderRadius:radius.md,padding:10,flexDirection:'row',gap:10,alignItems:'flex-start'}, skillCard:{borderColor:'rgba(34,211,238,0.28)',backgroundColor:'rgba(34,211,238,0.08)'}, toolCardError:{borderColor:'rgba(251,113,133,0.35)',backgroundColor:'rgba(251,113,133,0.08)'}, toolGlyph:{width:25,height:25,borderRadius:99,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(0,0,0,0.2)'}, toolTitle:{color:colors.text,fontSize:13,fontWeight:'900'}, toolSub:{color:colors.muted,fontSize:12,lineHeight:17,marginTop:2}, toolDetail:{color:colors.bad,fontSize:12,lineHeight:17,marginTop:6,fontFamily:Platform.select({ios:'Menlo',android:'monospace',default:'monospace'})},
+  headerCompact:{paddingHorizontal:16,paddingTop:8,paddingBottom:10,flexDirection:'row',alignItems:'center',justifyContent:'space-between',borderBottomWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(5,7,13,0.48)'}, rowCenter:{flexDirection:'row',alignItems:'center',gap:10,flex:1}, headerBack:{width:34,height:34,borderRadius:99,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(255,255,255,0.06)',borderWidth:1,borderColor:colors.stroke}, headerTitle:{color:colors.text,fontSize:20,fontWeight:'900',letterSpacing:-0.3}, headerSub:{color:colors.muted,fontSize:12,marginTop:2},
+  onboardingScreen:{padding:16,paddingBottom:36,gap:14}, hero:{alignItems:'center',gap:10,paddingTop:22,paddingBottom:8,paddingHorizontal:8}, heroTitle:{color:colors.text,fontSize:42,fontWeight:'900',letterSpacing:-1.4,textAlign:'center'}, orbital:{width:148,height:132,alignItems:'center',justifyContent:'center',marginVertical:8}, orbitalRing:{position:'absolute',width:142,height:76,borderRadius:999,borderWidth:1,borderColor:'rgba(139,92,246,0.52)',transform:[{rotate:'-18deg'}]}, orbitalRingTilt:{borderColor:'rgba(34,211,238,0.34)',transform:[{rotate:'24deg'}]}, orbitalCore:{width:70,height:70,borderRadius:35,alignItems:'center',justifyContent:'center',shadowColor:colors.primary,shadowOpacity:0.55,shadowRadius:18}, advancedLink:{alignSelf:'center',flexDirection:'row',alignItems:'center',gap:5,paddingVertical:4}, advancedText:{color:colors.primary2,fontWeight:'800'}, advancedPanel:{gap:10,borderTopWidth:1,borderColor:colors.stroke,paddingTop:10}, compactIcon:{width:34,height:34,borderRadius:99,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(255,255,255,0.05)',borderWidth:1,borderColor:colors.stroke},
+  opsRow:{borderWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(17,24,47,0.82)',borderRadius:radius.lg,padding:15,flexDirection:'row',alignItems:'center',gap:12,...shadow}, opsIcon:{width:42,height:42,borderRadius:14,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(139,92,246,0.14)',borderWidth:1,borderColor:'rgba(139,92,246,0.26)'}, compactListItem:{borderWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(255,255,255,0.035)',borderRadius:radius.md,overflow:'hidden'}, compactMain:{padding:12,flexDirection:'row',alignItems:'center',justifyContent:'space-between',gap:10}, statusDot:{width:9,height:9,borderRadius:99,backgroundColor:colors.good}, statusDotOff:{backgroundColor:colors.muted}, detailsPanel:{borderTopWidth:1,borderColor:colors.stroke,padding:12,gap:10,backgroundColor:'rgba(0,0,0,0.16)'}
 });
