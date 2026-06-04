@@ -10,7 +10,7 @@
     "resolveJsonModule": true,
     "noEmit": true,
     "baseUrl": ".",
-    "ignoreDeprecations": "6.0"
+    "ignoreDeprecations": "5.0"
   },
   "include": ["App.tsx", "src/**/*.ts", "src/**/*.tsx"]
 }
