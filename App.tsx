@@ -44,10 +44,22 @@ function sessionTime(s: SessionSummary): number {
   if (compactDate) return Date.parse(`${compactDate[1]}-${compactDate[2]}-${compactDate[3]}T00:00:00Z`) + Number(compactDate[4] || 0);
   return 0;
 }
+function sessionMessageCount(s: SessionSummary): number { return Number(s.message_count ?? (s as any).messages_count ?? 0) || 0; }
+function isEmptySession(s: SessionSummary): boolean { return sessionMessageCount(s) <= 0; }
 function isCronSession(s: SessionSummary): boolean {
   const haystack = `${titleOf(s)} ${sessionId(s)} ${safeText(s.source)}`.toLowerCase();
-  return /(^|\s|_)cron[_\s-]/.test(haystack) || haystack.includes(' cron_') || haystack.startsWith('cron_');
+  return /(^|\s|_)cron[_\s-]/.test(haystack) || haystack.includes(' cron_') || haystack.startsWith('cron_') || safeText(s.source).toLowerCase() === 'cron';
 }
+function isInternalAutomationSession(s: SessionSummary): boolean {
+  const source = safeText(s.source).toLowerCase();
+  const title = safeText(s.title || s.name).trim();
+  const id = sessionId(s).toLowerCase();
+  if (isEmptySession(s)) return true;
+  if ((source === 'cli' || source === 'system') && !title) return true;
+  if (/slack[-_\s]*(coordination|gate|classifier)/i.test(`${title} ${id}`)) return true;
+  return false;
+}
+function isUserFacingSession(s: SessionSummary): boolean { return !isInternalAutomationSession(s); }
 
 function safeText(value: any, fallback = ''): string {
   if (value == null) return fallback;
@@ -159,7 +171,10 @@ function isInternalContextBlob(text: string): boolean {
   const normalized = text.trim().replace(/^\uFEFF/, '');
   return /^\[CONTEXT COMPACTION\s+[—-]\s+REFERENCE ONLY\]/i.test(normalized)
     || /^Earlier turns were compacted into the summary below\./i.test(normalized)
-    || /^--- END OF CONTEXT SUMMARY/i.test(normalized);
+    || /^--- END OF CONTEXT SUMMARY/i.test(normalized)
+    || /You are Hermes's live Slack coordination gate/i.test(normalized)
+    || (/Return ONLY valid compact JSON/i.test(normalized) && /Allowed actions:\s*ignore,\s*store_context,\s*reply/i.test(normalized))
+    || /^\{\s*"action"\s*:\s*"(?:ignore|store_context|reply|act_locally|create_task|escalate_to_coop)"\s*,\s*"should_reply"/i.test(normalized);
 }
 
 function isVisibleMessage(message: Message): boolean {
@@ -392,7 +407,11 @@ function ChatScreen({ rest, rpc, connected, activeSession, setActiveSession, act
   const storedIdFromRpc = (r: any) => safeText(r?.stored_session_id || r?.session_key || r?.resumed || r?.id || r?.session_id);
   const runtimeIdFromRpc = (r: any) => safeText(r?.session_id || r?.runtime_session_id || r?.id);
   const sortedSessions = useMemo(() => [...sessions].sort((a, b) => sessionTime(b) - sessionTime(a)), [sessions]);
-  const drawerSessions = sortedSessions.filter(s => drawerMode === 'cron' ? isCronSession(s) : !isCronSession(s));
+  const drawerSessions = sortedSessions.filter(s => {
+    if (!isUserFacingSession(s)) return false;
+    if (drawerMode === 'cron') return isCronSession(s);
+    return !isCronSession(s);
+  });
 
   const loadSessions = async (reset = false) => {
     if (!rest) return;
@@ -575,6 +594,7 @@ function ArtifactsScreen({ rest }: { rest: HermesRestClient | null }) {
       const total = Array.isArray(data) ? undefined : data.total;
       const out: ArtifactItem[] = [];
       for (const s of sessions) {
+        if (!isUserFacingSession(s)) continue;
         try {
           const m = await rest.sessionMessages(sessionId(s));
           const messages = (m.messages || m || []).slice().reverse();
