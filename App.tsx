@@ -115,6 +115,19 @@ function parseMessageParts(content: any, role: MessageRole): MessagePart[] {
   return parts;
 }
 
+function isInternalContextBlob(text: string): boolean {
+  const normalized = text.trim().replace(/^\uFEFF/, '');
+  return /^\[CONTEXT COMPACTION\s+[—-]\s+REFERENCE ONLY\]/i.test(normalized)
+    || /^Earlier turns were compacted into the summary below\./i.test(normalized)
+    || /^--- END OF CONTEXT SUMMARY/i.test(normalized);
+}
+
+function isVisibleMessage(message: Message): boolean {
+  const text = message.text || message.parts?.filter(p => p.kind === 'text').map(p => (p as any).text).join('\n') || '';
+  if (isInternalContextBlob(text)) return false;
+  return !!(text.trim() || message.parts?.some(p => p.kind !== 'text'));
+}
+
 function messageFromRaw(raw: any, index: number): Message {
   const role = (['user', 'assistant', 'system', 'tool'].includes(raw?.role) ? raw.role : 'system') as MessageRole;
   const content = raw?.content ?? raw?.text ?? raw?.message ?? raw;
@@ -125,7 +138,7 @@ function messageFromRaw(raw: any, index: number): Message {
 
 function normalizeMessages(data: any): Message[] {
   const rows = Array.isArray(data) ? data : data?.messages || [];
-  return rows.map((m: any, i: number) => messageFromRaw(m, i));
+  return rows.map((m: any, i: number) => messageFromRaw(m, i)).filter(isVisibleMessage);
 }
 
 export default function App() {
@@ -160,6 +173,7 @@ export default function App() {
         setEvents(prev => [{ ...event, receivedAt: Date.now() }, ...prev].slice(0, 80));
         if (event.type === 'message.delta') {
           const text = safeText(event.payload);
+          if (isInternalContextBlob(text)) return;
           setMessages(prev => {
             const last = prev[prev.length - 1];
             if (last?.role === 'assistant' && !last.parts?.some(p => p.kind !== 'text')) return [...prev.slice(0, -1), { ...last, text: last.text + text, parts: [{ kind: 'text', text: last.text + text }] }];
@@ -169,7 +183,14 @@ export default function App() {
         if (event.type === 'message.complete') {
           const parts = parseMessageParts(event.payload?.message?.content || event.payload?.content || event.payload?.message || event.payload, 'assistant');
           const text = parts.filter(p => p.kind === 'text').map(p => (p as any).text).join('\n');
-          if (parts.length || text) setMessages(prev => [...prev, { id: makeId(), role: 'assistant', text, parts, at: Date.now() }]);
+          const completed: Message = { id: makeId(), role: 'assistant', text, parts, at: Date.now() };
+          if (!isVisibleMessage(completed)) return;
+          setMessages(prev => {
+            const last = prev[prev.length - 1];
+            if (last?.role === 'assistant' && !last.parts?.some(p => p.kind !== 'text')) return [...prev.slice(0, -1), completed];
+            if (prev.some(m => m.role === 'assistant' && m.text.trim() === text.trim())) return prev;
+            return [...prev, completed];
+          });
         }
         if (event.type === 'status.update') {
           const kind = safeText(event.payload?.kind);
@@ -296,6 +317,7 @@ function ChatScreen({ rest, rpc, connected, activeSession, setActiveSession, mes
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [err, setErr] = useState('');
+  const visibleMessages = messages.filter(isVisibleMessage);
 
   const refresh = async () => {
     if (!rest) return;
@@ -349,7 +371,7 @@ function ChatScreen({ rest, rpc, connected, activeSession, setActiveSession, mes
     </View>
     {err ? <Text style={styles.errorInline}>{err}</Text> : null}
     <ScrollView contentContainerStyle={styles.chatMessages}>
-      {loadingMessages ? <LoadingBlock label="Loading chat…" /> : messages.length ? messages.map((m: Message) => <MessageBubble key={m.id} message={m} />) : <View style={styles.centerPane}><Ionicons name="sparkles-outline" size={32} color={colors.primary2} /><Text style={styles.sectionTitle}>How can Hermes help?</Text><Text style={styles.mutedCenter}>Start typing, or open the menu to choose a previous session.</Text></View>}
+      {loadingMessages ? <LoadingBlock label="Loading chat…" /> : visibleMessages.length ? visibleMessages.map((m: Message) => <MessageBubble key={m.id} message={m} />) : <View style={styles.centerPane}><Ionicons name="sparkles-outline" size={32} color={colors.primary2} /><Text style={styles.sectionTitle}>How can Hermes help?</Text><Text style={styles.mutedCenter}>Start typing, or open the menu to choose a previous session.</Text></View>}
       {busy ? <ToolCallCard part={{ kind: 'tool', name: 'Hermes', status: 'running', summary: 'Thinking' }} /> : null}
     </ScrollView>
     <View style={styles.composer}><TextInput value={prompt} onChangeText={setPrompt} placeholder="Message Hermes…" placeholderTextColor={colors.faint} style={styles.composerInput} multiline /><Pressable onPress={submit} disabled={busy || !connected} style={[styles.send, (!connected || busy) && { opacity: 0.45 }]}><Ionicons name="send" color={colors.text} size={20}/></Pressable></View>
