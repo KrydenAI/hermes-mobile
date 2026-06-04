@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "Hermes Mobile",
+    "slug": "hermes-mobile",
+    "scheme": "hermesmobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "ai.kryden.hermesmobile",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Hermes Mobile uses the camera to scan pairing QR codes from your Hermes dashboard or setup wizard."
+      }
+    },
+    "android": {
+      "package": "ai.kryden.hermesmobile",
+      "permissions": [
+        "CAMERA"
+      ]
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-font"
+    ]
+  }
+}
