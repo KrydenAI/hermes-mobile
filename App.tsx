@@ -23,11 +23,12 @@ type Message = { id: string; role: MessageRole; text: string; at: number; parts?
 type ArtifactKind = 'image' | 'file' | 'link';
 type ArtifactOrigin = 'given' | 'produced';
 type ArtifactItem = { session: string; kind: ArtifactKind; label: string; value: string; href: string; canOpen: boolean; at: number; origin: ArtifactOrigin };
+type BriefItem = { id: string; sessionId: string; title: string; source: string; text: string; at: number };
 type Status = 'idle' | 'testing' | 'connected' | 'error';
 
 const tabs: { id: Exclude<Tab, 'home'>; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
   { id: 'chat', label: 'Chat', icon: 'chatbubble-ellipses-outline' },
-  { id: 'approvals', label: 'Needs Me', icon: 'hand-left-outline' },
+  { id: 'approvals', label: 'Pulse', icon: 'radio-outline' },
   { id: 'artifacts', label: 'Artifacts', icon: 'sparkles-outline' },
   { id: 'ops', label: 'Ops', icon: 'grid-outline' },
   { id: 'settings', label: 'Settings', icon: 'settings-outline' }
@@ -92,6 +93,7 @@ function safeText(value: any, fallback = ''): string {
 
 const SESSION_PAGE_SIZE = 50;
 const ARTIFACT_SESSION_PAGE_SIZE = 20;
+const PULSE_SESSION_PAGE_SIZE = 20;
 const DRAWER_MIN_VISIBLE_SESSIONS = 14;
 
 function isNearScrollEnd(event: any): boolean {
@@ -207,7 +209,7 @@ function messageFromRaw(raw: any, index: number): Message {
   const content = raw?.content ?? raw?.text ?? raw?.message ?? raw;
   const parts = parseMessageParts(content, role);
   const text = parts.filter(p => p.kind === 'text').map(p => (p as any).text).join('\n');
-  return { id: String(raw?.id || `${index}-${makeId()}`), role, text, parts, at: raw?.created_at ? Date.parse(raw.created_at) || Date.now() : Date.now() };
+  return { id: String(raw?.id || `${index}-${makeId()}`), role, text, parts, at: messageTime(raw, Date.now()) };
 }
 
 function normalizeMessages(data: any): Message[] {
@@ -224,6 +226,20 @@ function isToolOnlyMessage(message: Message): boolean {
   const parts = message.parts?.length ? message.parts : parseMessageParts(message.text, message.role);
   const text = parts.filter(p => p.kind === 'text').map(p => (p as any).text).join('').trim();
   return !!parts.length && !text && parts.some(p => p.kind !== 'text');
+}
+
+function briefTitle(text: string, fallback: string): string {
+  const heading = text.match(/^#\s+(.+)$/m)?.[1]?.trim();
+  if (heading) return heading.replace(/[*_`]/g, '').slice(0, 90);
+  const first = text.split('\n').map(line => line.replace(/^[-*]\s+/, '').trim()).find(Boolean);
+  return (first || fallback).replace(/[*_`]/g, '').slice(0, 90);
+}
+function briefPreview(text: string): string { return text.replace(/[#*_`>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 220); }
+function isUserFacingBriefMessage(message: Message): boolean {
+  if (message.role !== 'assistant' || isToolOnlyMessage(message)) return false;
+  const text = message.text.trim();
+  if (text.length < 180 || isInternalContextBlob(text)) return false;
+  return /^#\s+/m.test(text) || /\n[-*]\s+/.test(text) || /brief|digest|report|summary|generated|what moved|status|update/i.test(text);
 }
 
 export default function App() {
@@ -317,7 +333,7 @@ export default function App() {
           <View style={styles.body}>
             {tab === 'home' && <ConnectScreen profiles={profiles} active={profile} status={status} error={error} statusPayload={statusPayload} onSelect={setProfile} onSave={async (p: ConnectionProfile) => { setProfile(p); setProfiles(await upsertProfile(p)); await connect(p); }} onDelete={async (id: string) => { setProfiles(await deleteProfile(id)); if (profile?.id === id) setProfile(null); }} />}
             {tab === 'chat' && <ChatScreen rest={rest} rpc={rpcRef.current} connected={status === 'connected'} activeSession={activeSession} setActiveSession={setActiveSession} activeRuntimeSession={activeRuntimeSession} setActiveRuntimeSession={setActiveRuntimeSession} messages={messages} setMessages={setMessages} />}
-            {tab === 'approvals' && <ApprovalsScreen rpc={rpcRef.current} events={events} activeSession={activeSession} />}
+            {tab === 'approvals' && <PulseScreen rest={rest} rpc={rpcRef.current} events={events} activeSession={activeSession} setActiveSession={setActiveSession} setActiveRuntimeSession={setActiveRuntimeSession} setMessages={setMessages} setTab={setTab} />}
             {tab === 'artifacts' && <ArtifactsScreen rest={rest} />}
             {tab === 'ops' && opsScreen === 'hub' && <OpsHubScreen setOpsScreen={setOpsScreen} />}
             {tab === 'ops' && opsScreen === 'skills' && <SkillsScreen rest={rest} />}
@@ -333,7 +349,7 @@ export default function App() {
 }
 
 function Header({ profile, status, active, opsScreen, onStatusPress, onBack }: { profile: ConnectionProfile | null; status: Status; active: Tab; opsScreen: OpsScreen; onStatusPress: () => void; onBack?: () => void }) {
-  const title = active === 'approvals' ? 'Needs Me' : active === 'ops' ? (opsScreen === 'hub' ? 'Ops' : opsScreen === 'mcp' ? 'MCP Servers' : opsScreen === 'cron' ? 'Cron' : 'Skills') : active === 'artifacts' ? 'Artifacts' : active === 'settings' ? 'Settings' : 'Hermes';
+  const title = active === 'approvals' ? 'Pulse' : active === 'ops' ? (opsScreen === 'hub' ? 'Ops' : opsScreen === 'mcp' ? 'MCP Servers' : opsScreen === 'cron' ? 'Cron' : 'Skills') : active === 'artifacts' ? 'Artifacts' : active === 'settings' ? 'Settings' : 'Hermes';
   const subtitle = active === 'ops' && opsScreen === 'hub' ? 'Operate and extend Hermes.' : active === 'settings' ? 'Connection, profiles, auth, system.' : undefined;
   return <View style={styles.headerCompact}>
     <View style={styles.rowCenter}>
@@ -591,10 +607,69 @@ function ToolCallCard({ part }: { part: NonTextPart }) {
   </View>;
 }
 
-function ApprovalsScreen({ rpc, events, activeSession }: any) {
-  const actionable = events.filter((e: HermesEvent) => ['approval.request','clarify.request','sudo.request','secret.request'].includes(e.type));
+function PulseScreen({ rest, rpc, events, activeSession, setActiveSession, setActiveRuntimeSession, setMessages, setTab }: any) {
+  const [mode, setMode] = useState<'briefs' | 'actions'>('briefs');
+  const [briefs, setBriefs] = useState<BriefItem[]>([]);
+  const [selected, setSelected] = useState<BriefItem | null>(null);
   const [answer, setAnswer] = useState('');
-  return <ScrollView contentContainerStyle={styles.screen}><Card><Text style={styles.sectionTitle}>Needs me</Text><Text style={styles.muted}>Approval, clarify, sudo, and secret requests appear here in real time.</Text></Card>{actionable.length ? actionable.map((e: HermesEvent, i: number) => <Card key={`${e.receivedAt}-${i}`}><Text style={styles.eyebrow}>{e.type}</Text><Text style={styles.text}>{safeText(e.payload)}</Text>{e.type === 'approval.request' ? <View style={styles.row}><Button text="Approve" icon="checkmark-outline" onPress={() => rpc?.approval(e.session_id || activeSession, 'approve')} /><Button text="Deny" icon="close-outline" secondary onPress={() => rpc?.approval(e.session_id || activeSession, 'deny')} /></View> : <><Input value={answer} onChangeText={setAnswer} placeholder="Answer…" /><Button text="Send answer" icon="return-down-forward-outline" onPress={() => rpc?.clarify(e.payload?.request_id || e.payload?.id, answer)} /></>}</Card>) : <Empty title="Nothing needs you" body="Requests will appear here when Hermes needs a decision." />}</ScrollView>;
+  const [err, setErr] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
+  const actionable = events.filter((e: HermesEvent) => ['approval.request','clarify.request','sudo.request','secret.request'].includes(e.type));
+  const loadBriefs = async (reset = false) => {
+    if (!rest) return;
+    const nextOffset = reset ? 0 : offset;
+    if (!reset && (!hasMore || loading || loadingMore)) return;
+    reset ? setLoading(true) : setLoadingMore(true);
+    try {
+      const data = await rest.sessions(PULSE_SESSION_PAGE_SIZE, nextOffset, 'include');
+      const sessions = Array.isArray(data) ? data : data.sessions || [];
+      const total = Array.isArray(data) ? undefined : data.total;
+      const out: BriefItem[] = [];
+      for (const s of sessions) {
+        if (!isUserFacingSession(s) || !isCronSession(s)) continue;
+        try {
+          const raw = await rest.sessionMessages(sessionId(s));
+          const messages = normalizeMessages(raw).filter(isUserFacingBriefMessage).sort((a, b) => b.at - a.at);
+          const latest = messages[0];
+          if (!latest) continue;
+          out.push({ id: `${sessionId(s)}-${latest.id}`, sessionId: sessionId(s), title: briefTitle(latest.text, titleOf(s)), source: titleOf(s), text: latest.text, at: latest.at || sessionTime(s) });
+        } catch {}
+      }
+      setBriefs(prev => {
+        const byId = new Map<string, BriefItem>();
+        for (const item of reset ? out : [...prev, ...out]) byId.set(item.id, item);
+        return Array.from(byId.values()).sort((a, b) => b.at - a.at);
+      });
+      const advanced = nextOffset + sessions.length;
+      setOffset(advanced);
+      setHasMore(sessions.length === PULSE_SESSION_PAGE_SIZE && (typeof total !== 'number' || advanced < total));
+    } finally {
+      reset ? setLoading(false) : setLoadingMore(false);
+    }
+  };
+  useEffect(() => { loadBriefs(true).catch(e => setErr(e.message)); }, [rest]);
+  const openChat = async (brief: BriefItem) => {
+    setActiveSession(brief.sessionId);
+    setActiveRuntimeSession('');
+    try {
+      const raw = await rest?.sessionMessages(brief.sessionId);
+      if (raw) setMessages(normalizeMessages(raw));
+    } catch {}
+    setSelected(null);
+    setTab('chat');
+  };
+  return <>
+    <ScrollView contentContainerStyle={styles.screen} onScroll={(event) => { if (mode === 'briefs' && isNearScrollEnd(event)) loadBriefs(false).catch(e => setErr(e.message)); }} scrollEventThrottle={240}>
+      <Card><View style={styles.drawerFilterRow}><Pressable onPress={() => setMode('briefs')} style={[styles.drawerFilterPill, mode === 'briefs' && styles.drawerFilterPillActive]}><Text style={styles.drawerFilterText}>Briefs</Text></Pressable><Pressable onPress={() => setMode('actions')} style={[styles.drawerFilterPill, mode === 'actions' && styles.drawerFilterPillActive]}><Text style={styles.drawerFilterText}>Actions</Text></Pressable></View>{err ? <Text style={styles.error}>{err}</Text> : null}</Card>
+      {mode === 'actions' ? (actionable.length ? actionable.map((e: HermesEvent, i: number) => <Card key={`${e.receivedAt}-${i}`}><Text style={styles.eyebrow}>{e.type}</Text><Text style={styles.text}>{safeText(e.payload)}</Text>{e.type === 'approval.request' ? <View style={styles.row}><Button text="Approve" icon="checkmark-outline" onPress={() => rpc?.approval(e.session_id || activeSession, 'approve')} /><Button text="Deny" icon="close-outline" secondary onPress={() => rpc?.approval(e.session_id || activeSession, 'deny')} /></View> : <><Input value={answer} onChangeText={setAnswer} placeholder="Answer…" /><Button text="Send answer" icon="return-down-forward-outline" onPress={() => rpc?.clarify(e.payload?.request_id || e.payload?.id, answer)} /></>}</Card>) : <Empty title="Clear" body="Approvals and questions appear here when Hermes needs a decision." />) : null}
+      {mode === 'briefs' ? (loading ? <LoadingBlock label="Loading briefs…" /> : briefs.length ? briefs.map(brief => <Card key={brief.id}><Text style={styles.eyebrow}>{formatArtifactTime(brief.at)}</Text><Text style={styles.listTitle} numberOfLines={2}>{brief.title}</Text><Text style={styles.listSub} numberOfLines={1}>{brief.source}</Text><Text style={styles.muted} numberOfLines={4}>{briefPreview(brief.text)}</Text><View style={styles.row}><Button text="Read" icon="reader-outline" secondary onPress={() => setSelected(brief)} /><Button text="Chat" icon="chatbubble-outline" secondary onPress={() => openChat(brief)} /></View></Card>) : <Empty title="No briefs yet" body="Routine Hermes updates will appear here when cron runs produce user-facing messages." />) : null}
+      {mode === 'briefs' && loadingMore ? <LoadingBlock label="Loading more…" /> : mode === 'briefs' && hasMore && briefs.length ? <Text style={styles.mutedCenter}>Scroll for more</Text> : null}
+    </ScrollView>
+    <Modal visible={!!selected} transparent animationType="slide" onRequestClose={() => setSelected(null)}><Pressable style={styles.drawerScrim} onPress={() => setSelected(null)} /><View style={styles.briefModal}><View style={styles.rowBetween}><Text style={styles.sectionTitle} numberOfLines={2}>{selected?.title}</Text><Pressable onPress={() => setSelected(null)} style={styles.iconButton}><Ionicons name="close-outline" size={24} color={colors.text} /></Pressable></View><Text style={styles.listSub}>{selected ? formatArtifactTime(selected.at) : ''} · {selected?.source}</Text><ScrollView contentContainerStyle={{ gap: 12, paddingBottom: 18 }}><Text style={styles.text}>{selected?.text}</Text></ScrollView>{selected ? <Button text="Continue in chat" icon="chatbubble-outline" onPress={() => openChat(selected)} /> : null}</View></Modal>
+  </>;
 }
 
 function ArtifactsScreen({ rest }: { rest: HermesRestClient | null }) {
@@ -823,5 +898,5 @@ const styles = StyleSheet.create({
   toolCard:{alignSelf:'flex-start',maxWidth:'96%',borderWidth:1,borderColor:'rgba(139,92,246,0.28)',backgroundColor:'rgba(139,92,246,0.09)',borderRadius:radius.md,padding:10,flexDirection:'row',gap:10,alignItems:'flex-start'}, skillCard:{borderColor:'rgba(34,211,238,0.28)',backgroundColor:'rgba(34,211,238,0.08)'}, toolCardError:{borderColor:'rgba(251,113,133,0.35)',backgroundColor:'rgba(251,113,133,0.08)'}, toolGlyph:{width:25,height:25,borderRadius:99,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(0,0,0,0.2)'}, toolTitle:{color:colors.text,fontSize:13,fontWeight:'900'}, toolSub:{color:colors.muted,fontSize:12,lineHeight:17,marginTop:2}, toolDetail:{color:colors.bad,fontSize:12,lineHeight:17,marginTop:6,fontFamily:Platform.select({ios:'Menlo',android:'monospace',default:'monospace'})}, activityLine:{alignSelf:'flex-start',color:colors.muted,fontSize:12,fontWeight:'700',paddingHorizontal:3,paddingVertical:2},
   headerCompact:{paddingHorizontal:16,paddingTop:8,paddingBottom:10,flexDirection:'row',alignItems:'center',justifyContent:'space-between',borderBottomWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(5,7,13,0.48)'}, rowCenter:{flexDirection:'row',alignItems:'center',gap:10,flex:1}, headerBack:{width:34,height:34,borderRadius:99,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(255,255,255,0.06)',borderWidth:1,borderColor:colors.stroke}, headerTitle:{color:colors.text,fontSize:20,fontWeight:'900',letterSpacing:-0.3}, headerSub:{color:colors.muted,fontSize:12,marginTop:2},
   onboardingScreen:{padding:16,paddingBottom:36,gap:14}, hero:{alignItems:'center',gap:10,paddingTop:22,paddingBottom:8,paddingHorizontal:8}, heroTitle:{color:colors.text,fontSize:42,fontWeight:'900',letterSpacing:-1.4,textAlign:'center'}, orbital:{width:148,height:132,alignItems:'center',justifyContent:'center',marginVertical:8}, orbitalRing:{position:'absolute',width:142,height:76,borderRadius:999,borderWidth:1,borderColor:'rgba(139,92,246,0.52)',transform:[{rotate:'-18deg'}]}, orbitalRingTilt:{borderColor:'rgba(34,211,238,0.34)',transform:[{rotate:'24deg'}]}, orbitalCore:{width:70,height:70,borderRadius:35,alignItems:'center',justifyContent:'center',shadowColor:colors.primary,shadowOpacity:0.55,shadowRadius:18}, advancedLink:{alignSelf:'center',flexDirection:'row',alignItems:'center',gap:5,paddingVertical:4}, advancedText:{color:colors.primary2,fontWeight:'800'}, advancedPanel:{gap:10,borderTopWidth:1,borderColor:colors.stroke,paddingTop:10}, compactIcon:{width:34,height:34,borderRadius:99,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(255,255,255,0.05)',borderWidth:1,borderColor:colors.stroke},
-  opsRow:{borderWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(17,24,47,0.82)',borderRadius:radius.lg,padding:15,flexDirection:'row',alignItems:'center',gap:12,...shadow}, opsIcon:{width:42,height:42,borderRadius:14,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(139,92,246,0.14)',borderWidth:1,borderColor:'rgba(139,92,246,0.26)'}, compactListItem:{borderWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(255,255,255,0.035)',borderRadius:radius.md,overflow:'hidden'}, compactMain:{padding:12,flexDirection:'row',alignItems:'center',justifyContent:'space-between',gap:10}, statusDot:{width:9,height:9,borderRadius:99,backgroundColor:colors.good}, statusDotOff:{backgroundColor:colors.muted}, detailsPanel:{borderTopWidth:1,borderColor:colors.stroke,padding:12,gap:10,backgroundColor:'rgba(0,0,0,0.16)'}
+  opsRow:{borderWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(17,24,47,0.82)',borderRadius:radius.lg,padding:15,flexDirection:'row',alignItems:'center',gap:12,...shadow}, opsIcon:{width:42,height:42,borderRadius:14,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(139,92,246,0.14)',borderWidth:1,borderColor:'rgba(139,92,246,0.26)'}, compactListItem:{borderWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(255,255,255,0.035)',borderRadius:radius.md,overflow:'hidden'}, compactMain:{padding:12,flexDirection:'row',alignItems:'center',justifyContent:'space-between',gap:10}, statusDot:{width:9,height:9,borderRadius:99,backgroundColor:colors.good}, statusDotOff:{backgroundColor:colors.muted}, detailsPanel:{borderTopWidth:1,borderColor:colors.stroke,padding:12,gap:10,backgroundColor:'rgba(0,0,0,0.16)'}, briefModal:{position:'absolute',left:12,right:12,top:74,bottom:22,backgroundColor:'#080c18',borderWidth:1,borderColor:colors.stroke,borderRadius:radius.lg,padding:14,gap:12,...shadow}
 });
