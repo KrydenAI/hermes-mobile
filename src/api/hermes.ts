@@ -126,7 +126,10 @@ export class HermesRestClient {
   resumeCronJob(id: string) { return this.request<CronJob>(`/api/cron/jobs/${encodeURIComponent(id)}/resume`, { method: 'POST' }); }
   triggerCronJob(id: string) { return this.request<CronJob>(`/api/cron/jobs/${encodeURIComponent(id)}/trigger`, { method: 'POST' }); }
   deleteCronJob(id: string) { return this.request(`/api/cron/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' }); }
-  mcpServers() { return this.request<McpServer[]>('/api/mcp/servers'); }
+  mcpServers() { return this.request<{servers?: McpServer[]} | McpServer[]>('/api/mcp/servers'); }
+  createMcpServer(body: any) { return this.request<McpServer>('/api/mcp/servers', { method: 'POST', body: JSON.stringify(body) }); }
+  deleteMcpServer(name: string) { return this.request(`/api/mcp/servers/${encodeURIComponent(name)}`, { method: 'DELETE' }); }
+  testMcpServer(name: string) { return this.request<any>(`/api/mcp/servers/${encodeURIComponent(name)}/test`, { method: 'POST' }); }
   mcpCatalog() { return this.request<any>('/api/mcp/catalog'); }
   installMcp(body: any) { return this.request('/api/mcp/catalog/install', { method: 'POST', body: JSON.stringify(body) }); }
   setMcpEnabled(name: string, enabled: boolean) { return this.request(`/api/mcp/servers/${encodeURIComponent(name)}/enabled`, { method: 'PUT', body: JSON.stringify({ enabled }) }); }

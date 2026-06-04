@@ -47,4 +47,5 @@ export type CronJob = {
 
 export type SkillInfo = { name: string; description?: string; enabled?: boolean; category?: string; tags?: string[]; [key: string]: unknown };
 export type ToolsetInfo = { name: string; description?: string; enabled?: boolean; tools?: string[]; provider?: string; [key: string]: unknown };
-export type McpServer = { name: string; command?: string; url?: string; enabled?: boolean; status?: string; tools?: string[]; [key: string]: unknown };
+export type McpServer = { name: string; command?: string; url?: string; transport?: string; auth?: string; enabled?: boolean; status?: string; args?: string[]; env?: Record<string, string>; tools?: string[] | null; [key: string]: unknown };
+export type McpCatalogEntry = { name: string; description?: string; source?: string; transport?: string; auth_type?: string; required_env?: { name: string; prompt?: string; required?: boolean }[]; needs_install?: boolean; installed?: boolean; enabled?: boolean; [key: string]: unknown };
