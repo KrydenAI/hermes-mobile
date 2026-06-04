@@ -36,6 +36,18 @@ function makeId() { return `${Date.now().toString(36)}-${Math.random().toString(
 function sessionId(s: SessionSummary): string { return String(s.session_id || s.id || s.stored_session_id || ''); }
 function titleOf(s: SessionSummary): string { return safeText(s.title || s.name || sessionId(s).slice(0, 8) || 'Untitled'); }
 function shortId(id: string) { return id ? id.slice(0, 10) : 'new'; }
+function sessionTime(s: SessionSummary): number {
+  const raw = safeText(s.updated_at || s.created_at || (s as any).last_message_at || (s as any).last_updated || (s as any).timestamp);
+  const parsed = raw ? Date.parse(raw) : 0;
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  const compactDate = `${sessionId(s)} ${titleOf(s)}`.match(/(20\d{2})(\d{2})(\d{2})(?:[_-](\d+))?/);
+  if (compactDate) return Date.parse(`${compactDate[1]}-${compactDate[2]}-${compactDate[3]}T00:00:00Z`) + Number(compactDate[4] || 0);
+  return 0;
+}
+function isCronSession(s: SessionSummary): boolean {
+  const haystack = `${titleOf(s)} ${sessionId(s)} ${safeText(s.source)}`.toLowerCase();
+  return /(^|\s|_)cron[_\s-]/.test(haystack) || haystack.includes(' cron_') || haystack.startsWith('cron_');
+}
 
 function safeText(value: any, fallback = ''): string {
   if (value == null) return fallback;
@@ -328,6 +340,7 @@ function ConnectScreen({ profiles, active, status, error, statusPayload, onSelec
 function ChatScreen({ rest, rpc, connected, activeSession, setActiveSession, activeRuntimeSession, setActiveRuntimeSession, messages, setMessages }: any) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [drawerMode, setDrawerMode] = useState<'chats' | 'cron'>('chats');
   const [prompt, setPrompt] = useState('');
   const [busy, setBusy] = useState(false);
   const [loadingSessions, setLoadingSessions] = useState(false);
@@ -355,6 +368,8 @@ function ChatScreen({ rest, rpc, connected, activeSession, setActiveSession, act
   };
   const storedIdFromRpc = (r: any) => safeText(r?.stored_session_id || r?.session_key || r?.resumed || r?.id || r?.session_id);
   const runtimeIdFromRpc = (r: any) => safeText(r?.session_id || r?.runtime_session_id || r?.id);
+  const sortedSessions = useMemo(() => [...sessions].sort((a, b) => sessionTime(b) - sessionTime(a)), [sessions]);
+  const drawerSessions = sortedSessions.filter(s => drawerMode === 'cron' ? isCronSession(s) : !isCronSession(s));
 
   const refresh = async () => {
     if (!rest) return;
@@ -429,7 +444,7 @@ function ChatScreen({ rest, rpc, connected, activeSession, setActiveSession, act
 
   return <View style={styles.chatRoot}>
     <View style={styles.chatTopBar}>
-      <Pressable onPress={() => setDrawerOpen(true)} style={styles.iconButton}><Ionicons name="menu-outline" size={24} color={colors.text} /></Pressable>
+      <Pressable onPress={() => { setDrawerMode('chats'); setDrawerOpen(true); }} style={styles.iconButton}><Ionicons name="menu-outline" size={24} color={colors.text} /></Pressable>
       <View style={{ flex: 1 }}><Text style={styles.chatTitle}>{activeSession ? titleOf(sessions.find(s => sessionId(s) === activeSession) || ({ title: shortId(activeSession) } as any)) : 'New chat'}</Text><Text style={styles.chatSub}>{connected ? 'Live Hermes session' : 'Connect backend first'}</Text></View>
       <Pressable onPress={newSession} disabled={!connected} style={styles.iconButton}><Ionicons name="add-outline" size={24} color={connected ? colors.text : colors.faint} /></Pressable>
     </View>
@@ -444,7 +459,11 @@ function ChatScreen({ rest, rpc, connected, activeSession, setActiveSession, act
       <View style={styles.drawer}>
         <View style={styles.rowBetween}><Text style={styles.sectionTitle}>Chats</Text><Pressable onPress={() => setDrawerOpen(false)} style={styles.iconButton}><Ionicons name="close-outline" size={24} color={colors.text} /></Pressable></View>
         <Button text="New chat" icon="add-outline" onPress={newSession} />
-        {loadingSessions ? <LoadingBlock label="Loading sessions…" compact /> : <ScrollView contentContainerStyle={{ gap: 8, paddingBottom: 26 }}>{sessions.map(s => <Pressable key={sessionId(s)} style={[styles.drawerItem, activeSession === sessionId(s) && styles.selected]} onPress={() => openSession(sessionId(s))}><Text style={styles.listTitle} numberOfLines={1}>{titleOf(s)}</Text><Text style={styles.listSub}>{shortId(sessionId(s))} · {safeText(s.message_count ?? 0)} messages</Text></Pressable>)}</ScrollView>}
+        <View style={styles.drawerFilterRow}>
+          <Pressable onPress={() => setDrawerMode('chats')} style={[styles.drawerFilterPill, drawerMode === 'chats' && styles.drawerFilterPillActive]}><Text style={styles.drawerFilterText}>Chats</Text></Pressable>
+          <Pressable onPress={() => setDrawerMode('cron')} style={[styles.drawerFilterPill, drawerMode === 'cron' && styles.drawerFilterPillActive]}><Text style={styles.drawerFilterText}>Cron</Text></Pressable>
+        </View>
+        {loadingSessions ? <LoadingBlock label="Loading sessions…" compact /> : <ScrollView contentContainerStyle={{ gap: 8, paddingBottom: 26 }}>{drawerSessions.map(s => <Pressable key={sessionId(s)} style={[styles.drawerItem, activeSession === sessionId(s) && styles.selected]} onPress={() => openSession(sessionId(s))}><Text style={styles.listTitle} numberOfLines={1}>{titleOf(s)}</Text><Text style={styles.listSub}>{shortId(sessionId(s))} · {safeText(s.message_count ?? 0)} messages</Text></Pressable>)}</ScrollView>}
       </View>
     </Modal>
   </View>;
@@ -690,7 +709,7 @@ const styles = StyleSheet.create({
   chatRoot:{flex:1}, chatTopBar:{flexDirection:'row',alignItems:'center',gap:10,paddingHorizontal:12,paddingVertical:10,borderBottomWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(5,7,13,0.55)'}, iconButton:{width:42,height:42,borderRadius:99,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(255,255,255,0.06)',borderWidth:1,borderColor:colors.stroke}, chatTitle:{color:colors.text,fontSize:18,fontWeight:'900'}, chatSub:{color:colors.muted,fontSize:12,marginTop:2}, chatMessages:{padding:14,paddingBottom:28,gap:8,minHeight:'100%'}, centerPane:{flex:1,minHeight:420,alignItems:'center',justifyContent:'center',gap:10,paddingHorizontal:30},
   composer:{flexDirection:'row',alignItems:'flex-end',gap:10,padding:12,borderTopWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(5,7,13,0.96)'}, composerInput:{flex:1,maxHeight:130,backgroundColor:'rgba(255,255,255,0.06)',borderWidth:1,borderColor:colors.stroke,borderRadius:22,paddingHorizontal:15,paddingVertical:11,color:colors.text}, send:{backgroundColor:colors.primary,borderRadius:99,width:46,height:46,alignItems:'center',justifyContent:'center'},
   messageWrap:{alignSelf:'stretch',gap:6,marginBottom:8}, messageWrapUser:{alignItems:'flex-end'}, bubble:{borderRadius:radius.lg,padding:13,gap:5}, userBubble:{backgroundColor:'rgba(139,92,246,0.25)',alignSelf:'flex-end',maxWidth:'92%'}, assistantBubble:{backgroundColor:'rgba(255,255,255,0.06)',alignSelf:'flex-start',maxWidth:'96%'}, bubbleRole:{color:colors.primary2,fontSize:11,fontWeight:'900',textTransform:'uppercase'},
-  drawerScrim:{...StyleSheet.absoluteFillObject,backgroundColor:'rgba(0,0,0,0.52)'}, drawer:{position:'absolute',left:0,top:0,bottom:0,width:'82%',maxWidth:360,backgroundColor:'#080c18',borderRightWidth:1,borderColor:colors.stroke,paddingTop:58,paddingHorizontal:14,gap:12}, drawerItem:{borderWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(255,255,255,0.04)',borderRadius:radius.md,padding:13},
+  drawerScrim:{...StyleSheet.absoluteFillObject,backgroundColor:'rgba(0,0,0,0.52)'}, drawer:{position:'absolute',left:0,top:0,bottom:0,width:'82%',maxWidth:360,backgroundColor:'#080c18',borderRightWidth:1,borderColor:colors.stroke,paddingTop:58,paddingHorizontal:14,gap:12}, drawerItem:{borderWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(255,255,255,0.04)',borderRadius:radius.md,padding:13}, drawerFilterRow:{flexDirection:'row',gap:10}, drawerFilterPill:{flex:1,borderWidth:1,borderColor:'rgba(255,255,255,0.84)',borderRadius:radius.md,paddingVertical:10,alignItems:'center',justifyContent:'center',backgroundColor:'transparent'}, drawerFilterPillActive:{backgroundColor:'rgba(255,255,255,0.12)',borderColor:colors.text}, drawerFilterText:{color:colors.text,fontSize:13,fontWeight:'900'},
   toolCard:{alignSelf:'flex-start',maxWidth:'96%',borderWidth:1,borderColor:'rgba(139,92,246,0.28)',backgroundColor:'rgba(139,92,246,0.09)',borderRadius:radius.md,padding:10,flexDirection:'row',gap:10,alignItems:'flex-start'}, skillCard:{borderColor:'rgba(34,211,238,0.28)',backgroundColor:'rgba(34,211,238,0.08)'}, toolCardError:{borderColor:'rgba(251,113,133,0.35)',backgroundColor:'rgba(251,113,133,0.08)'}, toolGlyph:{width:25,height:25,borderRadius:99,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(0,0,0,0.2)'}, toolTitle:{color:colors.text,fontSize:13,fontWeight:'900'}, toolSub:{color:colors.muted,fontSize:12,lineHeight:17,marginTop:2}, toolDetail:{color:colors.bad,fontSize:12,lineHeight:17,marginTop:6,fontFamily:Platform.select({ios:'Menlo',android:'monospace',default:'monospace'})}, activityLine:{alignSelf:'flex-start',color:colors.muted,fontSize:12,fontWeight:'700',paddingHorizontal:3,paddingVertical:2},
   headerCompact:{paddingHorizontal:16,paddingTop:8,paddingBottom:10,flexDirection:'row',alignItems:'center',justifyContent:'space-between',borderBottomWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(5,7,13,0.48)'}, rowCenter:{flexDirection:'row',alignItems:'center',gap:10,flex:1}, headerBack:{width:34,height:34,borderRadius:99,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(255,255,255,0.06)',borderWidth:1,borderColor:colors.stroke}, headerTitle:{color:colors.text,fontSize:20,fontWeight:'900',letterSpacing:-0.3}, headerSub:{color:colors.muted,fontSize:12,marginTop:2},
   onboardingScreen:{padding:16,paddingBottom:36,gap:14}, hero:{alignItems:'center',gap:10,paddingTop:22,paddingBottom:8,paddingHorizontal:8}, heroTitle:{color:colors.text,fontSize:42,fontWeight:'900',letterSpacing:-1.4,textAlign:'center'}, orbital:{width:148,height:132,alignItems:'center',justifyContent:'center',marginVertical:8}, orbitalRing:{position:'absolute',width:142,height:76,borderRadius:999,borderWidth:1,borderColor:'rgba(139,92,246,0.52)',transform:[{rotate:'-18deg'}]}, orbitalRingTilt:{borderColor:'rgba(34,211,238,0.34)',transform:[{rotate:'24deg'}]}, orbitalCore:{width:70,height:70,borderRadius:35,alignItems:'center',justifyContent:'center',shadowColor:colors.primary,shadowOpacity:0.55,shadowRadius:18}, advancedLink:{alignSelf:'center',flexDirection:'row',alignItems:'center',gap:5,paddingVertical:4}, advancedText:{color:colors.primary2,fontWeight:'800'}, advancedPanel:{gap:10,borderTopWidth:1,borderColor:colors.stroke,paddingTop:10}, compactIcon:{width:34,height:34,borderRadius:99,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(255,255,255,0.05)',borderWidth:1,borderColor:colors.stroke},
