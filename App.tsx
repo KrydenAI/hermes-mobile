@@ -81,6 +81,7 @@ function safeText(value: any, fallback = ''): string {
 
 const SESSION_PAGE_SIZE = 50;
 const ARTIFACT_SESSION_PAGE_SIZE = 20;
+const DRAWER_MIN_VISIBLE_SESSIONS = 14;
 
 function isNearScrollEnd(event: any): boolean {
   const { layoutMeasurement, contentOffset, contentSize } = event.nativeEvent;
@@ -97,6 +98,13 @@ function appendUniqueSessions(existing: SessionSummary[], incoming: SessionSumma
     next.push(s);
   }
   return next;
+}
+
+function visibleSessionCount(rows: SessionSummary[], mode: 'chats' | 'cron'): number {
+  return rows.filter(s => {
+    if (!isUserFacingSession(s)) return false;
+    return mode === 'cron' ? isCronSession(s) : !isCronSession(s);
+  }).length;
 }
 
 function compactJson(value: any, max = 140): string {
@@ -413,24 +421,31 @@ function ChatScreen({ rest, rpc, connected, activeSession, setActiveSession, act
     return !isCronSession(s);
   });
 
-  const loadSessions = async (reset = false) => {
+  const loadSessions = async (reset = false, minVisible = 0, mode: 'chats' | 'cron' = drawerMode) => {
     if (!rest) return;
-    const offset = reset ? 0 : sessionOffset;
+    let offset = reset ? 0 : sessionOffset;
     if (!reset && (!sessionsHasMore || loadingSessions || loadingMoreSessions)) return;
     reset ? setLoadingSessions(true) : setLoadingMoreSessions(true);
     try {
-      const data = await rest.sessions(SESSION_PAGE_SIZE, offset, 'include');
-      const batch = Array.isArray(data) ? data : data.sessions || [];
-      const total = Array.isArray(data) ? undefined : data.total;
-      setSessions(prev => reset ? batch : appendUniqueSessions(prev, batch));
-      const nextOffset = offset + batch.length;
-      setSessionOffset(nextOffset);
-      setSessionsHasMore(batch.length === SESSION_PAGE_SIZE && (typeof total !== 'number' || nextOffset < total));
+      let merged = reset ? [] : sessions;
+      let hasMore = reset ? true : sessionsHasMore;
+      for (let page = 0; page < 8 && hasMore; page += 1) {
+        const data = await rest.sessions(SESSION_PAGE_SIZE, offset, 'include');
+        const batch = Array.isArray(data) ? data : data.sessions || [];
+        const total = Array.isArray(data) ? undefined : data.total;
+        merged = appendUniqueSessions(merged, batch);
+        offset += batch.length;
+        hasMore = batch.length === SESSION_PAGE_SIZE && (typeof total !== 'number' || offset < total);
+        if (!minVisible || visibleSessionCount(merged, mode) >= minVisible) break;
+      }
+      setSessions(merged);
+      setSessionOffset(offset);
+      setSessionsHasMore(hasMore);
     } finally {
       reset ? setLoadingSessions(false) : setLoadingMoreSessions(false);
     }
   };
-  const refresh = async () => loadSessions(true);
+  const refresh = async () => loadSessions(true, DRAWER_MIN_VISIBLE_SESSIONS, 'chats');
   useEffect(() => { refresh().catch(e => setErr(e.message)); }, [rest]);
 
   const openSession = async (sid: string) => {
@@ -496,7 +511,7 @@ function ChatScreen({ rest, rpc, connected, activeSession, setActiveSession, act
 
   return <View style={styles.chatRoot}>
     <View style={styles.chatTopBar}>
-      <Pressable onPress={() => { setDrawerMode('chats'); setDrawerOpen(true); }} style={styles.iconButton}><Ionicons name="menu-outline" size={24} color={colors.text} /></Pressable>
+      <Pressable onPress={() => { setDrawerMode('chats'); setDrawerOpen(true); loadSessions(false, DRAWER_MIN_VISIBLE_SESSIONS, 'chats').catch(e => setErr(e.message)); }} style={styles.iconButton}><Ionicons name="menu-outline" size={24} color={colors.text} /></Pressable>
       <View style={{ flex: 1 }}><Text style={styles.chatTitle}>{activeSession ? titleOf(sessions.find(s => sessionId(s) === activeSession) || ({ title: shortId(activeSession) } as any)) : 'New chat'}</Text><Text style={styles.chatSub}>{connected ? 'Live Hermes session' : 'Connect backend first'}</Text></View>
       <Pressable onPress={newSession} disabled={!connected} style={styles.iconButton}><Ionicons name="add-outline" size={24} color={connected ? colors.text : colors.faint} /></Pressable>
     </View>
@@ -512,8 +527,8 @@ function ChatScreen({ rest, rpc, connected, activeSession, setActiveSession, act
         <View style={styles.rowBetween}><Text style={styles.sectionTitle}>Chats</Text><Pressable onPress={() => setDrawerOpen(false)} style={styles.iconButton}><Ionicons name="close-outline" size={24} color={colors.text} /></Pressable></View>
         <Button text="New chat" icon="add-outline" onPress={newSession} />
         <View style={styles.drawerFilterRow}>
-          <Pressable onPress={() => setDrawerMode('chats')} style={[styles.drawerFilterPill, drawerMode === 'chats' && styles.drawerFilterPillActive]}><Text style={styles.drawerFilterText}>Chats</Text></Pressable>
-          <Pressable onPress={() => setDrawerMode('cron')} style={[styles.drawerFilterPill, drawerMode === 'cron' && styles.drawerFilterPillActive]}><Text style={styles.drawerFilterText}>Cron</Text></Pressable>
+          <Pressable onPress={() => { setDrawerMode('chats'); loadSessions(false, DRAWER_MIN_VISIBLE_SESSIONS, 'chats').catch(e => setErr(e.message)); }} style={[styles.drawerFilterPill, drawerMode === 'chats' && styles.drawerFilterPillActive]}><Text style={styles.drawerFilterText}>Chats</Text></Pressable>
+          <Pressable onPress={() => { setDrawerMode('cron'); loadSessions(false, DRAWER_MIN_VISIBLE_SESSIONS, 'cron').catch(e => setErr(e.message)); }} style={[styles.drawerFilterPill, drawerMode === 'cron' && styles.drawerFilterPillActive]}><Text style={styles.drawerFilterText}>Cron</Text></Pressable>
         </View>
         {loadingSessions ? <LoadingBlock label="Loading sessions…" compact /> : <ScrollView contentContainerStyle={{ gap: 8, paddingBottom: 26 }} onScroll={(event) => { if (isNearScrollEnd(event)) loadSessions(false).catch(e => setErr(e.message)); }} scrollEventThrottle={240}>{drawerSessions.map(s => <Pressable key={sessionId(s)} style={[styles.drawerItem, activeSession === sessionId(s) && styles.selected]} onPress={() => openSession(sessionId(s))}><Text style={styles.listTitle} numberOfLines={1}>{titleOf(s)}</Text><Text style={styles.listSub}>{shortId(sessionId(s))} · {safeText(s.message_count ?? 0)} messages</Text></Pressable>)}{loadingMoreSessions ? <LoadingBlock label="Loading more…" compact /> : sessionsHasMore ? <Text style={styles.mutedCenter}>Scroll for more</Text> : null}</ScrollView>}
       </View>
