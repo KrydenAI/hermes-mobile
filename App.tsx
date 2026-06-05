@@ -23,7 +23,8 @@ type Message = { id: string; role: MessageRole; text: string; at: number; parts?
 type ArtifactKind = 'image' | 'file' | 'link';
 type ArtifactOrigin = 'given' | 'produced';
 type ArtifactItem = { session: string; kind: ArtifactKind; label: string; value: string; href: string; canOpen: boolean; at: number; origin: ArtifactOrigin };
-type PulseStatus = 'attention' | 'active' | 'delivered';
+type PulseStatus = 'attention' | 'working' | 'delivered';
+type PulseFilter = 'latest' | 'attention' | 'working' | 'history';
 type PulseItem = { id: string; status: PulseStatus; title: string; meta: string; summary: string; at: number; sourceId?: string; text?: string; event?: HermesEvent };
 type Status = 'idle' | 'testing' | 'connected' | 'error';
 
@@ -609,9 +610,8 @@ function ToolCallCard({ part }: { part: NonTextPart }) {
 }
 
 function PulseScreen({ rest, rpc, events, activeSession, setActiveSession, setActiveRuntimeSession, setMessages, setTab, setOpsScreen }: any) {
-  const [filter, setFilter] = useState<'all' | PulseStatus>('all');
+  const [filter, setFilter] = useState<PulseFilter>('latest');
   const [delivered, setDelivered] = useState<PulseItem[]>([]);
-  const [active, setActive] = useState<PulseItem[]>([]);
   const [selected, setSelected] = useState<PulseItem | null>(null);
   const [answer, setAnswer] = useState('');
   const [err, setErr] = useState('');
@@ -630,22 +630,17 @@ function PulseScreen({ rest, rpc, events, activeSession, setActiveSession, setAc
     sourceId: safeText(e.session_id || activeSession),
     event: e
   }));
+  const working = events.filter((e: HermesEvent) => e.type === 'status.update').slice(0, 12).map((e: HermesEvent, i: number): PulseItem => {
+    const text = safeText(e.payload?.text || e.payload?.message || e.payload || 'Working');
+    const kind = safeText(e.payload?.kind || 'Working');
+    return { id: `working-${e.receivedAt || i}`, status: 'working', title: briefTitle(text, kind), meta: `${kind || 'Working'} · ${formatArtifactTime(e.receivedAt || Date.now())}`, summary: compactJson(text, 190), at: e.receivedAt || Date.now(), sourceId: safeText(e.session_id || activeSession) };
+  });
   const loadPulse = async (reset = false) => {
     if (!rest) return;
     const nextOffset = reset ? 0 : offset;
     if (!reset && (!hasMore || loading || loadingMore)) return;
     reset ? setLoading(true) : setLoadingMore(true);
     try {
-      if (reset) {
-        const jobs = await rest.cronJobs().catch(() => []);
-        const rows = Array.isArray(jobs) ? jobs : [];
-        setActive(rows.filter((j: CronJob) => !(j.enabled === false || j.paused)).slice(0, 20).map((j: CronJob): PulseItem => {
-          const id = safeText(j.job_id || j.id || j.name || makeId());
-          const schedule = safeText((j as any).schedule_display || (typeof j.schedule === 'object' ? (j.schedule as any).display : j.schedule));
-          const next = safeText((j as any).next_run || (j as any).nextRun || (j as any).next);
-          return { id: `job-${id}`, status: 'active', title: safeText(j.name || id), meta: `Active · ${next ? `Next ${next}` : schedule || 'Scheduled'}`, summary: compactJson(j.prompt || (j as any).last_status || 'Scheduled automation is active.', 190), at: messageTime(j, Date.now()), sourceId: id };
-        }));
-      }
       const data = await rest.sessions(PULSE_SESSION_PAGE_SIZE, nextOffset, 'include');
       const sessions = Array.isArray(data) ? data : data.sessions || [];
       const total = Array.isArray(data) ? undefined : data.total;
@@ -689,13 +684,14 @@ function PulseScreen({ rest, rpc, events, activeSession, setActiveSession, setAc
     if (!item.event) return;
     await rpc?.approval(item.event.session_id || activeSession, decision);
   };
-  const allItems = [...attention, ...active, ...delivered].sort((a, b) => b.at - a.at);
-  const shown = filter === 'all' ? allItems : allItems.filter(item => item.status === filter);
-  const filters: { id: 'all' | PulseStatus; label: string; count?: number }[] = [
-    { id: 'all', label: 'All' },
+  const latestItems = [...attention, ...delivered].sort((a, b) => b.at - a.at);
+  const historyItems = delivered.slice(8);
+  const shown = filter === 'latest' ? latestItems : filter === 'attention' ? attention : filter === 'working' ? working : historyItems.length ? historyItems : delivered;
+  const filters: { id: PulseFilter; label: string; count?: number }[] = [
+    { id: 'latest', label: 'Latest' },
     { id: 'attention', label: 'Attention', count: attention.length },
-    { id: 'active', label: 'Active', count: active.length },
-    { id: 'delivered', label: 'Delivered' }
+    { id: 'working', label: 'Working', count: working.length },
+    { id: 'history', label: 'History' }
   ];
   const renderActions = (item: PulseItem) => {
     if (item.status === 'attention') {
@@ -703,7 +699,7 @@ function PulseScreen({ rest, rpc, events, activeSession, setActiveSession, setAc
       if (item.event?.type === 'clarify.request') return <><Input value={answer} onChangeText={setAnswer} placeholder="Answer…" style={{ minWidth: 180, flex: 1 }} /><Button text="Send" icon="return-down-forward-outline" secondary onPress={() => rpc?.clarify(item.event?.payload?.request_id || item.event?.payload?.id, answer)} /></>;
       return <Button text="Chat" icon="chatbubble-outline" secondary onPress={() => item.sourceId ? openChat(item) : undefined} />;
     }
-    if (item.status === 'active') return <><Button text="View" icon="pulse-outline" secondary onPress={openOps} /><Button text="Chat" icon="chatbubble-outline" secondary onPress={() => item.sourceId ? openChat(item) : undefined} /></>;
+    if (item.status === 'working') return <><Button text="View" icon="pulse-outline" secondary onPress={() => item.sourceId ? openChat(item) : undefined} /><Button text="Chat" icon="chatbubble-outline" secondary onPress={() => item.sourceId ? openChat(item) : undefined} /></>;
     return <><Button text="Read" icon="reader-outline" secondary onPress={() => setSelected(item)} /><Button text="Chat" icon="chatbubble-outline" secondary onPress={() => openChat(item)} /></>;
   };
   const renderItem = (item: PulseItem) => <Card key={item.id}>
@@ -715,8 +711,8 @@ function PulseScreen({ rest, rpc, events, activeSession, setActiveSession, setAc
   </Card>;
   return <>
     <ScrollView contentContainerStyle={styles.screen} onScroll={(event) => { if (isNearScrollEnd(event)) loadPulse(false).catch(e => setErr(e.message)); }} scrollEventThrottle={240}>
-      <Card><Text style={styles.title}>Hermes is on it.</Text><Text style={styles.muted}>Here’s what’s happening.</Text><View style={styles.pulseFilterRow}>{filters.map(f => <Pressable key={f.id} onPress={() => setFilter(f.id)} style={[styles.pulseFilterPill, filter === f.id && styles.pulseFilterPillActive]}><Text style={styles.drawerFilterText}>{f.label}{typeof f.count === 'number' && f.count > 0 ? ` ${f.count}` : ''}</Text></Pressable>)}</View>{err ? <Text style={styles.error}>{err}</Text> : null}</Card>
-      {loading ? <LoadingBlock label="Loading pulse…" /> : shown.length ? (filter === 'all' ? <>{attention.length ? <Text style={styles.sectionTitle}>Attention</Text> : null}{attention.map(renderItem)}{active.length ? <Text style={styles.sectionTitle}>Active</Text> : null}{active.map(renderItem)}{delivered.length ? <Text style={styles.sectionTitle}>Delivered</Text> : null}{delivered.map(renderItem)}</> : shown.map(renderItem)) : <Empty title="Clear" body="Pulse will show attention items, active automations, and delivered briefs." />}
+      <Card><Text style={styles.title}>Hermes is on it.</Text><Text style={styles.muted}>Latest briefs, decisions, and work activity.</Text><View style={styles.pulseFilterRow}>{filters.map(f => <Pressable key={f.id} onPress={() => setFilter(f.id)} style={[styles.pulseFilterPill, filter === f.id && styles.pulseFilterPillActive]}><Text style={styles.drawerFilterText}>{f.label}{typeof f.count === 'number' && f.count > 0 ? ` ${f.count}` : ''}</Text></Pressable>)}</View>{err ? <Text style={styles.error}>{err}</Text> : null}</Card>
+      {loading ? <LoadingBlock label="Loading pulse…" /> : shown.length ? (filter === 'latest' ? <>{attention.length ? <><Text style={styles.sectionTitle}>Attention</Text>{attention.map(renderItem)}</> : null}{delivered.length ? <><Text style={styles.sectionTitle}>Latest</Text>{delivered.slice(0, 8).map(renderItem)}</> : null}</> : shown.map(renderItem)) : filter === 'attention' ? <Empty title="Clear" body="Nothing is blocked on you right now." /> : filter === 'working' ? <Empty title="No live work" body="Working shows current/recent run activity, not configured schedules." /> : filter === 'latest' ? <Empty title="No latest yet" body="Briefs, decisions, and meaningful Hermes updates will appear here." /> : <Empty title="No history yet" body="Delivered briefs and completed run messages will appear here." />}
       {loadingMore ? <LoadingBlock label="Loading more…" /> : hasMore && shown.length ? <Text style={styles.mutedCenter}>Scroll for more</Text> : null}
     </ScrollView>
     <Modal visible={!!selected} transparent animationType="slide" onRequestClose={() => setSelected(null)}><Pressable style={styles.drawerScrim} onPress={() => setSelected(null)} /><View style={styles.briefModal}><View style={styles.rowBetween}><Text style={styles.sectionTitle} numberOfLines={2}>{selected?.title}</Text><Pressable onPress={() => setSelected(null)} style={styles.iconButton}><Ionicons name="close-outline" size={24} color={colors.text} /></Pressable></View><Text style={styles.listSub}>{selected?.meta}</Text><ScrollView contentContainerStyle={{ gap: 12, paddingBottom: 18 }}><Text style={styles.text}>{selected?.text}</Text></ScrollView>{selected?.sourceId ? <Button text="Continue in chat" icon="chatbubble-outline" onPress={() => openChat(selected)} /> : null}</View></Modal>
