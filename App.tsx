@@ -23,7 +23,8 @@ type Message = { id: string; role: MessageRole; text: string; at: number; parts?
 type ArtifactKind = 'image' | 'file' | 'link';
 type ArtifactOrigin = 'given' | 'produced';
 type ArtifactItem = { session: string; kind: ArtifactKind; label: string; value: string; href: string; canOpen: boolean; at: number; origin: ArtifactOrigin };
-type BriefItem = { id: string; sessionId: string; title: string; source: string; text: string; at: number };
+type PulseStatus = 'attention' | 'active' | 'delivered';
+type PulseItem = { id: string; status: PulseStatus; title: string; meta: string; summary: string; at: number; sourceId?: string; text?: string; event?: HermesEvent };
 type Status = 'idle' | 'testing' | 'connected' | 'error';
 
 const tabs: { id: Exclude<Tab, 'home'>; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
@@ -333,7 +334,7 @@ export default function App() {
           <View style={styles.body}>
             {tab === 'home' && <ConnectScreen profiles={profiles} active={profile} status={status} error={error} statusPayload={statusPayload} onSelect={setProfile} onSave={async (p: ConnectionProfile) => { setProfile(p); setProfiles(await upsertProfile(p)); await connect(p); }} onDelete={async (id: string) => { setProfiles(await deleteProfile(id)); if (profile?.id === id) setProfile(null); }} />}
             {tab === 'chat' && <ChatScreen rest={rest} rpc={rpcRef.current} connected={status === 'connected'} activeSession={activeSession} setActiveSession={setActiveSession} activeRuntimeSession={activeRuntimeSession} setActiveRuntimeSession={setActiveRuntimeSession} messages={messages} setMessages={setMessages} />}
-            {tab === 'approvals' && <PulseScreen rest={rest} rpc={rpcRef.current} events={events} activeSession={activeSession} setActiveSession={setActiveSession} setActiveRuntimeSession={setActiveRuntimeSession} setMessages={setMessages} setTab={setTab} />}
+            {tab === 'approvals' && <PulseScreen rest={rest} rpc={rpcRef.current} events={events} activeSession={activeSession} setActiveSession={setActiveSession} setActiveRuntimeSession={setActiveRuntimeSession} setMessages={setMessages} setTab={setTab} setOpsScreen={setOpsScreen} />}
             {tab === 'artifacts' && <ArtifactsScreen rest={rest} />}
             {tab === 'ops' && opsScreen === 'hub' && <OpsHubScreen setOpsScreen={setOpsScreen} />}
             {tab === 'ops' && opsScreen === 'skills' && <SkillsScreen rest={rest} />}
@@ -607,10 +608,11 @@ function ToolCallCard({ part }: { part: NonTextPart }) {
   </View>;
 }
 
-function PulseScreen({ rest, rpc, events, activeSession, setActiveSession, setActiveRuntimeSession, setMessages, setTab }: any) {
-  const [mode, setMode] = useState<'briefs' | 'actions'>('briefs');
-  const [briefs, setBriefs] = useState<BriefItem[]>([]);
-  const [selected, setSelected] = useState<BriefItem | null>(null);
+function PulseScreen({ rest, rpc, events, activeSession, setActiveSession, setActiveRuntimeSession, setMessages, setTab, setOpsScreen }: any) {
+  const [filter, setFilter] = useState<'all' | PulseStatus>('all');
+  const [delivered, setDelivered] = useState<PulseItem[]>([]);
+  const [active, setActive] = useState<PulseItem[]>([]);
+  const [selected, setSelected] = useState<PulseItem | null>(null);
   const [answer, setAnswer] = useState('');
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(false);
@@ -618,16 +620,36 @@ function PulseScreen({ rest, rpc, events, activeSession, setActiveSession, setAc
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(true);
   const actionable = events.filter((e: HermesEvent) => ['approval.request','clarify.request','sudo.request','secret.request'].includes(e.type));
-  const loadBriefs = async (reset = false) => {
+  const attention = actionable.map((e: HermesEvent, i: number): PulseItem => ({
+    id: `event-${e.receivedAt || i}-${e.type}`,
+    status: 'attention',
+    title: e.type === 'approval.request' ? 'Approval needed' : e.type === 'clarify.request' ? 'Clarification needed' : e.type === 'secret.request' ? 'Secret needed' : 'Hermes needs access',
+    meta: `Attention · ${safeText(e.payload?.title || e.payload?.name || e.session_id || activeSession || 'Hermes')}`,
+    summary: compactJson(e.payload?.prompt || e.payload?.message || e.payload?.instruction || e.payload, 180),
+    at: e.receivedAt || Date.now(),
+    sourceId: safeText(e.session_id || activeSession),
+    event: e
+  }));
+  const loadPulse = async (reset = false) => {
     if (!rest) return;
     const nextOffset = reset ? 0 : offset;
     if (!reset && (!hasMore || loading || loadingMore)) return;
     reset ? setLoading(true) : setLoadingMore(true);
     try {
+      if (reset) {
+        const jobs = await rest.cronJobs().catch(() => []);
+        const rows = Array.isArray(jobs) ? jobs : [];
+        setActive(rows.filter((j: CronJob) => !(j.enabled === false || j.paused)).slice(0, 20).map((j: CronJob): PulseItem => {
+          const id = safeText(j.job_id || j.id || j.name || makeId());
+          const schedule = safeText((j as any).schedule_display || (typeof j.schedule === 'object' ? (j.schedule as any).display : j.schedule));
+          const next = safeText((j as any).next_run || (j as any).nextRun || (j as any).next);
+          return { id: `job-${id}`, status: 'active', title: safeText(j.name || id), meta: `Active · ${next ? `Next ${next}` : schedule || 'Scheduled'}`, summary: compactJson(j.prompt || (j as any).last_status || 'Scheduled automation is active.', 190), at: messageTime(j, Date.now()), sourceId: id };
+        }));
+      }
       const data = await rest.sessions(PULSE_SESSION_PAGE_SIZE, nextOffset, 'include');
       const sessions = Array.isArray(data) ? data : data.sessions || [];
       const total = Array.isArray(data) ? undefined : data.total;
-      const out: BriefItem[] = [];
+      const out: PulseItem[] = [];
       for (const s of sessions) {
         if (!isUserFacingSession(s) || !isCronSession(s)) continue;
         try {
@@ -635,11 +657,11 @@ function PulseScreen({ rest, rpc, events, activeSession, setActiveSession, setAc
           const messages = normalizeMessages(raw).filter(isUserFacingBriefMessage).sort((a, b) => b.at - a.at);
           const latest = messages[0];
           if (!latest) continue;
-          out.push({ id: `${sessionId(s)}-${latest.id}`, sessionId: sessionId(s), title: briefTitle(latest.text, titleOf(s)), source: titleOf(s), text: latest.text, at: latest.at || sessionTime(s) });
+          out.push({ id: `brief-${sessionId(s)}-${latest.id}`, status: 'delivered', title: briefTitle(latest.text, titleOf(s)), meta: `Delivered ${formatArtifactTime(latest.at || sessionTime(s))} · Automation`, summary: briefPreview(latest.text), at: latest.at || sessionTime(s), sourceId: sessionId(s), text: latest.text });
         } catch {}
       }
-      setBriefs(prev => {
-        const byId = new Map<string, BriefItem>();
+      setDelivered(prev => {
+        const byId = new Map<string, PulseItem>();
         for (const item of reset ? out : [...prev, ...out]) byId.set(item.id, item);
         return Array.from(byId.values()).sort((a, b) => b.at - a.at);
       });
@@ -650,25 +672,54 @@ function PulseScreen({ rest, rpc, events, activeSession, setActiveSession, setAc
       reset ? setLoading(false) : setLoadingMore(false);
     }
   };
-  useEffect(() => { loadBriefs(true).catch(e => setErr(e.message)); }, [rest]);
-  const openChat = async (brief: BriefItem) => {
-    setActiveSession(brief.sessionId);
+  useEffect(() => { loadPulse(true).catch(e => setErr(e.message)); }, [rest]);
+  const openChat = async (item: PulseItem) => {
+    if (!item.sourceId) return;
+    setActiveSession(item.sourceId);
     setActiveRuntimeSession('');
     try {
-      const raw = await rest?.sessionMessages(brief.sessionId);
+      const raw = await rest?.sessionMessages(item.sourceId);
       if (raw) setMessages(normalizeMessages(raw));
     } catch {}
     setSelected(null);
     setTab('chat');
   };
+  const openOps = () => { setOpsScreen('cron'); setTab('ops'); };
+  const resolve = async (item: PulseItem, decision: 'approve' | 'deny') => {
+    if (!item.event) return;
+    await rpc?.approval(item.event.session_id || activeSession, decision);
+  };
+  const allItems = [...attention, ...active, ...delivered].sort((a, b) => b.at - a.at);
+  const shown = filter === 'all' ? allItems : allItems.filter(item => item.status === filter);
+  const filters: { id: 'all' | PulseStatus; label: string; count?: number }[] = [
+    { id: 'all', label: 'All' },
+    { id: 'attention', label: 'Attention', count: attention.length },
+    { id: 'active', label: 'Active', count: active.length },
+    { id: 'delivered', label: 'Delivered' }
+  ];
+  const renderActions = (item: PulseItem) => {
+    if (item.status === 'attention') {
+      if (item.event?.type === 'approval.request') return <><Button text="Approve" icon="checkmark-outline" secondary onPress={() => resolve(item, 'approve')} /><Button text="Deny" icon="close-outline" secondary onPress={() => resolve(item, 'deny')} /><Button text="Chat" icon="chatbubble-outline" secondary onPress={() => item.sourceId ? openChat(item) : undefined} /></>;
+      if (item.event?.type === 'clarify.request') return <><Input value={answer} onChangeText={setAnswer} placeholder="Answer…" style={{ minWidth: 180, flex: 1 }} /><Button text="Send" icon="return-down-forward-outline" secondary onPress={() => rpc?.clarify(item.event?.payload?.request_id || item.event?.payload?.id, answer)} /></>;
+      return <Button text="Chat" icon="chatbubble-outline" secondary onPress={() => item.sourceId ? openChat(item) : undefined} />;
+    }
+    if (item.status === 'active') return <><Button text="View" icon="pulse-outline" secondary onPress={openOps} /><Button text="Chat" icon="chatbubble-outline" secondary onPress={() => item.sourceId ? openChat(item) : undefined} /></>;
+    return <><Button text="Read" icon="reader-outline" secondary onPress={() => setSelected(item)} /><Button text="Chat" icon="chatbubble-outline" secondary onPress={() => openChat(item)} /></>;
+  };
+  const renderItem = (item: PulseItem) => <Card key={item.id}>
+    <View style={styles.rowBetween}><Text style={styles.eyebrow}>{item.status}</Text><Text style={styles.listSub}>{formatArtifactTime(item.at)}</Text></View>
+    <Text style={styles.listTitle} numberOfLines={2}>{item.title}</Text>
+    <Text style={styles.listSub} numberOfLines={1}>{item.meta}</Text>
+    <Text style={styles.muted} numberOfLines={4}>{item.summary}</Text>
+    <View style={styles.row}>{renderActions(item)}</View>
+  </Card>;
   return <>
-    <ScrollView contentContainerStyle={styles.screen} onScroll={(event) => { if (mode === 'briefs' && isNearScrollEnd(event)) loadBriefs(false).catch(e => setErr(e.message)); }} scrollEventThrottle={240}>
-      <Card><View style={styles.drawerFilterRow}><Pressable onPress={() => setMode('briefs')} style={[styles.drawerFilterPill, mode === 'briefs' && styles.drawerFilterPillActive]}><Text style={styles.drawerFilterText}>Briefs</Text></Pressable><Pressable onPress={() => setMode('actions')} style={[styles.drawerFilterPill, mode === 'actions' && styles.drawerFilterPillActive]}><Text style={styles.drawerFilterText}>Actions</Text></Pressable></View>{err ? <Text style={styles.error}>{err}</Text> : null}</Card>
-      {mode === 'actions' ? (actionable.length ? actionable.map((e: HermesEvent, i: number) => <Card key={`${e.receivedAt}-${i}`}><Text style={styles.eyebrow}>{e.type}</Text><Text style={styles.text}>{safeText(e.payload)}</Text>{e.type === 'approval.request' ? <View style={styles.row}><Button text="Approve" icon="checkmark-outline" onPress={() => rpc?.approval(e.session_id || activeSession, 'approve')} /><Button text="Deny" icon="close-outline" secondary onPress={() => rpc?.approval(e.session_id || activeSession, 'deny')} /></View> : <><Input value={answer} onChangeText={setAnswer} placeholder="Answer…" /><Button text="Send answer" icon="return-down-forward-outline" onPress={() => rpc?.clarify(e.payload?.request_id || e.payload?.id, answer)} /></>}</Card>) : <Empty title="Clear" body="Approvals and questions appear here when Hermes needs a decision." />) : null}
-      {mode === 'briefs' ? (loading ? <LoadingBlock label="Loading briefs…" /> : briefs.length ? briefs.map(brief => <Card key={brief.id}><Text style={styles.eyebrow}>{formatArtifactTime(brief.at)}</Text><Text style={styles.listTitle} numberOfLines={2}>{brief.title}</Text><Text style={styles.listSub} numberOfLines={1}>{brief.source}</Text><Text style={styles.muted} numberOfLines={4}>{briefPreview(brief.text)}</Text><View style={styles.row}><Button text="Read" icon="reader-outline" secondary onPress={() => setSelected(brief)} /><Button text="Chat" icon="chatbubble-outline" secondary onPress={() => openChat(brief)} /></View></Card>) : <Empty title="No briefs yet" body="Routine Hermes updates will appear here when cron runs produce user-facing messages." />) : null}
-      {mode === 'briefs' && loadingMore ? <LoadingBlock label="Loading more…" /> : mode === 'briefs' && hasMore && briefs.length ? <Text style={styles.mutedCenter}>Scroll for more</Text> : null}
+    <ScrollView contentContainerStyle={styles.screen} onScroll={(event) => { if (isNearScrollEnd(event)) loadPulse(false).catch(e => setErr(e.message)); }} scrollEventThrottle={240}>
+      <Card><Text style={styles.title}>Hermes is on it.</Text><Text style={styles.muted}>Here’s what’s happening.</Text><View style={styles.pulseFilterRow}>{filters.map(f => <Pressable key={f.id} onPress={() => setFilter(f.id)} style={[styles.pulseFilterPill, filter === f.id && styles.pulseFilterPillActive]}><Text style={styles.drawerFilterText}>{f.label}{typeof f.count === 'number' && f.count > 0 ? ` ${f.count}` : ''}</Text></Pressable>)}</View>{err ? <Text style={styles.error}>{err}</Text> : null}</Card>
+      {loading ? <LoadingBlock label="Loading pulse…" /> : shown.length ? (filter === 'all' ? <>{attention.length ? <Text style={styles.sectionTitle}>Attention</Text> : null}{attention.map(renderItem)}{active.length ? <Text style={styles.sectionTitle}>Active</Text> : null}{active.map(renderItem)}{delivered.length ? <Text style={styles.sectionTitle}>Delivered</Text> : null}{delivered.map(renderItem)}</> : shown.map(renderItem)) : <Empty title="Clear" body="Pulse will show attention items, active automations, and delivered briefs." />}
+      {loadingMore ? <LoadingBlock label="Loading more…" /> : hasMore && shown.length ? <Text style={styles.mutedCenter}>Scroll for more</Text> : null}
     </ScrollView>
-    <Modal visible={!!selected} transparent animationType="slide" onRequestClose={() => setSelected(null)}><Pressable style={styles.drawerScrim} onPress={() => setSelected(null)} /><View style={styles.briefModal}><View style={styles.rowBetween}><Text style={styles.sectionTitle} numberOfLines={2}>{selected?.title}</Text><Pressable onPress={() => setSelected(null)} style={styles.iconButton}><Ionicons name="close-outline" size={24} color={colors.text} /></Pressable></View><Text style={styles.listSub}>{selected ? formatArtifactTime(selected.at) : ''} · {selected?.source}</Text><ScrollView contentContainerStyle={{ gap: 12, paddingBottom: 18 }}><Text style={styles.text}>{selected?.text}</Text></ScrollView>{selected ? <Button text="Continue in chat" icon="chatbubble-outline" onPress={() => openChat(selected)} /> : null}</View></Modal>
+    <Modal visible={!!selected} transparent animationType="slide" onRequestClose={() => setSelected(null)}><Pressable style={styles.drawerScrim} onPress={() => setSelected(null)} /><View style={styles.briefModal}><View style={styles.rowBetween}><Text style={styles.sectionTitle} numberOfLines={2}>{selected?.title}</Text><Pressable onPress={() => setSelected(null)} style={styles.iconButton}><Ionicons name="close-outline" size={24} color={colors.text} /></Pressable></View><Text style={styles.listSub}>{selected?.meta}</Text><ScrollView contentContainerStyle={{ gap: 12, paddingBottom: 18 }}><Text style={styles.text}>{selected?.text}</Text></ScrollView>{selected?.sourceId ? <Button text="Continue in chat" icon="chatbubble-outline" onPress={() => openChat(selected)} /> : null}</View></Modal>
   </>;
 }
 
@@ -894,7 +945,7 @@ const styles = StyleSheet.create({
   chatRoot:{flex:1}, chatTopBar:{flexDirection:'row',alignItems:'center',gap:10,paddingHorizontal:12,paddingVertical:10,borderBottomWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(5,7,13,0.55)'}, iconButton:{width:42,height:42,borderRadius:99,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(255,255,255,0.06)',borderWidth:1,borderColor:colors.stroke}, chatTitle:{color:colors.text,fontSize:18,fontWeight:'900'}, chatSub:{color:colors.muted,fontSize:12,marginTop:2}, chatMessages:{padding:14,paddingBottom:28,gap:8,minHeight:'100%'}, centerPane:{flex:1,minHeight:420,alignItems:'center',justifyContent:'center',gap:10,paddingHorizontal:30},
   composer:{flexDirection:'row',alignItems:'flex-end',gap:10,padding:12,borderTopWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(5,7,13,0.96)'}, composerInput:{flex:1,maxHeight:130,backgroundColor:'rgba(255,255,255,0.06)',borderWidth:1,borderColor:colors.stroke,borderRadius:22,paddingHorizontal:15,paddingVertical:11,color:colors.text}, send:{backgroundColor:colors.primary,borderRadius:99,width:46,height:46,alignItems:'center',justifyContent:'center'},
   messageWrap:{alignSelf:'stretch',gap:6,marginBottom:8}, messageWrapUser:{alignItems:'flex-end'}, bubble:{borderRadius:radius.lg,padding:13,gap:5}, userBubble:{backgroundColor:'rgba(139,92,246,0.25)',alignSelf:'flex-end',maxWidth:'92%'}, assistantBubble:{backgroundColor:'rgba(255,255,255,0.06)',alignSelf:'flex-start',maxWidth:'96%'}, bubbleRole:{color:colors.primary2,fontSize:11,fontWeight:'900',textTransform:'uppercase'},
-  drawerScrim:{...StyleSheet.absoluteFillObject,backgroundColor:'rgba(0,0,0,0.52)'}, drawer:{position:'absolute',left:0,top:0,bottom:0,width:'82%',maxWidth:360,backgroundColor:'#080c18',borderRightWidth:1,borderColor:colors.stroke,paddingTop:58,paddingHorizontal:14,gap:12}, drawerItem:{borderWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(255,255,255,0.04)',borderRadius:radius.md,padding:13}, drawerFilterRow:{flexDirection:'row',gap:10}, drawerFilterPill:{flex:1,borderWidth:1,borderColor:'rgba(255,255,255,0.84)',borderRadius:radius.md,paddingVertical:10,alignItems:'center',justifyContent:'center',backgroundColor:'transparent'}, drawerFilterPillActive:{backgroundColor:'rgba(255,255,255,0.12)',borderColor:colors.text}, drawerFilterText:{color:colors.text,fontSize:13,fontWeight:'900'},
+  drawerScrim:{...StyleSheet.absoluteFillObject,backgroundColor:'rgba(0,0,0,0.52)'}, drawer:{position:'absolute',left:0,top:0,bottom:0,width:'82%',maxWidth:360,backgroundColor:'#080c18',borderRightWidth:1,borderColor:colors.stroke,paddingTop:58,paddingHorizontal:14,gap:12}, drawerItem:{borderWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(255,255,255,0.04)',borderRadius:radius.md,padding:13}, drawerFilterRow:{flexDirection:'row',gap:10}, drawerFilterPill:{flex:1,borderWidth:1,borderColor:'rgba(255,255,255,0.84)',borderRadius:radius.md,paddingVertical:10,alignItems:'center',justifyContent:'center',backgroundColor:'transparent'}, drawerFilterPillActive:{backgroundColor:'rgba(255,255,255,0.12)',borderColor:colors.text}, drawerFilterText:{color:colors.text,fontSize:13,fontWeight:'900'}, pulseFilterRow:{flexDirection:'row',gap:7,flexWrap:'wrap',marginTop:4}, pulseFilterPill:{borderWidth:1,borderColor:colors.stroke,borderRadius:999,paddingHorizontal:11,paddingVertical:8,backgroundColor:'rgba(255,255,255,0.04)'}, pulseFilterPillActive:{backgroundColor:'rgba(139,92,246,0.22)',borderColor:'rgba(139,92,246,0.5)'},
   toolCard:{alignSelf:'flex-start',maxWidth:'96%',borderWidth:1,borderColor:'rgba(139,92,246,0.28)',backgroundColor:'rgba(139,92,246,0.09)',borderRadius:radius.md,padding:10,flexDirection:'row',gap:10,alignItems:'flex-start'}, skillCard:{borderColor:'rgba(34,211,238,0.28)',backgroundColor:'rgba(34,211,238,0.08)'}, toolCardError:{borderColor:'rgba(251,113,133,0.35)',backgroundColor:'rgba(251,113,133,0.08)'}, toolGlyph:{width:25,height:25,borderRadius:99,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(0,0,0,0.2)'}, toolTitle:{color:colors.text,fontSize:13,fontWeight:'900'}, toolSub:{color:colors.muted,fontSize:12,lineHeight:17,marginTop:2}, toolDetail:{color:colors.bad,fontSize:12,lineHeight:17,marginTop:6,fontFamily:Platform.select({ios:'Menlo',android:'monospace',default:'monospace'})}, activityLine:{alignSelf:'flex-start',color:colors.muted,fontSize:12,fontWeight:'700',paddingHorizontal:3,paddingVertical:2},
   headerCompact:{paddingHorizontal:16,paddingTop:8,paddingBottom:10,flexDirection:'row',alignItems:'center',justifyContent:'space-between',borderBottomWidth:1,borderColor:colors.stroke,backgroundColor:'rgba(5,7,13,0.48)'}, rowCenter:{flexDirection:'row',alignItems:'center',gap:10,flex:1}, headerBack:{width:34,height:34,borderRadius:99,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(255,255,255,0.06)',borderWidth:1,borderColor:colors.stroke}, headerTitle:{color:colors.text,fontSize:20,fontWeight:'900',letterSpacing:-0.3}, headerSub:{color:colors.muted,fontSize:12,marginTop:2},
   onboardingScreen:{padding:16,paddingBottom:36,gap:14}, hero:{alignItems:'center',gap:10,paddingTop:22,paddingBottom:8,paddingHorizontal:8}, heroTitle:{color:colors.text,fontSize:42,fontWeight:'900',letterSpacing:-1.4,textAlign:'center'}, orbital:{width:148,height:132,alignItems:'center',justifyContent:'center',marginVertical:8}, orbitalRing:{position:'absolute',width:142,height:76,borderRadius:999,borderWidth:1,borderColor:'rgba(139,92,246,0.52)',transform:[{rotate:'-18deg'}]}, orbitalRingTilt:{borderColor:'rgba(34,211,238,0.34)',transform:[{rotate:'24deg'}]}, orbitalCore:{width:70,height:70,borderRadius:35,alignItems:'center',justifyContent:'center',shadowColor:colors.primary,shadowOpacity:0.55,shadowRadius:18}, advancedLink:{alignSelf:'center',flexDirection:'row',alignItems:'center',gap:5,paddingVertical:4}, advancedText:{color:colors.primary2,fontWeight:'800'}, advancedPanel:{gap:10,borderTopWidth:1,borderColor:colors.stroke,paddingTop:10}, compactIcon:{width:34,height:34,borderRadius:99,alignItems:'center',justifyContent:'center',backgroundColor:'rgba(255,255,255,0.05)',borderWidth:1,borderColor:colors.stroke},
