@@ -11,16 +11,10 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "ai.kryden.hermesmobile",
-      "infoPlist": {
-        "NSCameraUsageDescription": "Hermes Mobile uses the camera to scan pairing QR codes from your Hermes dashboard or setup wizard."
-      }
+      "bundleIdentifier": "ai.kryden.hermesmobile"
     },
     "android": {
-      "package": "ai.kryden.hermesmobile",
-      "permissions": [
-        "CAMERA"
-      ]
+      "package": "ai.kryden.hermesmobile"
     },
     "web": {
       "bundler": "metro"

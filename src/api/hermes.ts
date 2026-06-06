@@ -162,12 +162,16 @@ export async function prepareConnectionProfile(profile: ConnectionProfile): Prom
   const probe = await probeGateway(profile.baseUrl);
 
   if (!probe.authRequired) {
-    const token = profile.token || probe.injectedToken;
+    // In insecure Tailnet/LAN mode the dashboard injects the current websocket token
+    // into the served HTML. Prefer that fresh token over any saved token because
+    // restarting the dashboard can rotate it; REST may still look OK while /api/ws
+    // rejects a stale saved token.
+    const token = probe.injectedToken || profile.token;
     if (!token) throw new Error('Dashboard is reachable but did not expose a session token. Make sure it is running in mobile-compatible local mode.');
     return {
       profile: { ...profile, baseUrl: probe.baseUrl, token, authMode: 'token', wsTicket: undefined },
       status: probe.status,
-      message: profile.token ? 'Connected with saved session token.' : 'Auto-discovered dashboard session token from Hermes.'
+      message: probe.injectedToken ? 'Auto-discovered dashboard session token from Hermes.' : 'Connected with saved session token.'
     };
   }
 
