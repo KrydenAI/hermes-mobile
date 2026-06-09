@@ -8,9 +8,7 @@
     "strict": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
-    "noEmit": true,
-    "baseUrl": ".",
-    "ignoreDeprecations": "5.0"
+    "noEmit": true
   },
   "include": [
     "App.tsx",
