@@ -136,6 +136,8 @@ export class HermesRestClient {
   installMcp(body: any) { return this.request('/api/mcp/catalog/install', { method: 'POST', body: JSON.stringify(body) }); }
   setMcpEnabled(name: string, enabled: boolean) { return this.request(`/api/mcp/servers/${encodeURIComponent(name)}/enabled`, { method: 'PUT', body: JSON.stringify({ enabled }) }); }
   profiles() { return this.request<any>('/api/profiles'); }
+  createProfile(body: any) { return this.request<any>('/api/profiles', { method: 'POST', body: JSON.stringify(body) }); }
+  profileSetupCommand(name: string) { return this.request<{command: string}>(`/api/profiles/${encodeURIComponent(name)}/setup-command`); }
   logs(lines = 100) { return this.request<any>(`/api/logs?lines=${lines}`); }
   analytics(days = 7) { return this.request<any>(`/api/analytics/usage?days=${days}`); }
 }
